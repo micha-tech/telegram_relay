@@ -11,7 +11,7 @@ dependencies = [
   "djangorestframework-simplejwt>=5.3,<5.6", "django-cors-headers>=4.4,<5",
   "dj-database-url>=2.2,<3", "psycopg[binary]>=3.2,<4",
   "redis>=5.0,<6", "telethon>=1.36,<2", "cryptography>=43,<46",
-  "gunicorn>=23,<24", "python-json-logger>=2,<4",
+  "gunicorn>=23,<24", "uvicorn>=0.32,<1", "python-json-logger>=2,<4",
 ]
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "pytest-django>=4.9,<5", "ruff>=0.7,<1", "mypy>=1.12,<2"]
@@ -25,3 +25,5 @@ line-length = 100
 target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
+[tool.ruff.lint.per-file-ignores]
+"relay/migrations/*" = ["E501", "I001"]

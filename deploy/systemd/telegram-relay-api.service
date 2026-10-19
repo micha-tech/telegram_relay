@@ -1,0 +1,29 @@
+[Unit]
+Description=Telegram Relay API (gunicorn/uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=relay
+Group=relay
+WorkingDirectory=/opt/telegram_relay
+EnvironmentFile=/opt/telegram_relay/.env
+ExecStart=/opt/telegram_relay/.venv/bin/gunicorn config.asgi:application --bind 127.0.0.1:8000 --workers 2 --worker-class uvicorn.workers.UvicornWorker --graceful-timeout 30 --access-logfile -
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

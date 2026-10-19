@@ -1,6 +1,5 @@
 # Deployment
 
-Apply migrations as a release step before starting processes. Run the API with Gunicorn and run exactly one `python manage.py runtelegramworker` deployment unless account partitioning is added. Configure Aiven/Upstash TLS URLs, restrictive `ALLOWED_HOSTS` and `CORS_ORIGINS`, strong independent app/JWT/encryption secrets, centralized JSON logs, and backups. Health checks target `/health/`.
+See [JustRunMy.App](justrunmyapp.md) for the managed-container topology (two apps: API + worker, from one image) and [VPS deployment](vps-docker.md) for Docker Compose + Caddy or bare-metal systemd on a plain server. Apply migrations as a release step before starting processes. Run the API with gunicorn/uvicorn (`config.asgi:application`) and `python manage.py runtelegramworker` as a separate service. Multiple worker replicas use renewable Redis account-ownership locks with exponential reconnect backoff, though a single replica is the simplest initial deployment. Configure TLS database/Redis URLs, restrictive `ALLOWED_HOSTS` and `CORS_ORIGINS`, strong independent app/JWT/encryption secrets, centralized JSON logs, and backups. Use `/health/live/` for liveness and `/health/ready/` for dependency readiness.
 
 Never bake `.env`, Telethon session data, Telegram codes, or database/Redis credentials into images. The Docker image uses a non-root user and handles SIGTERM in the worker.
-

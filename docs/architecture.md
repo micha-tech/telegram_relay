@@ -18,12 +18,13 @@ The API and worker share models and services but are separate OS processes. `run
 ## Components
 
 - `relay/views.py`: thin authenticated HTTP boundary with consistent envelopes.
-- `relay/models.py`: ownership, Telegram accounts/entities, encrypted sessions/challenges, relays, processing outcomes, audit records.
-- `relay/services/telegram_auth.py`: persisted code/2FA state machine.
-- `relay/services/session_store.py`: encrypted durable session abstraction.
+- `relay/models.py`: ownership, Telegram accounts/entities, encrypted sessions/challenges, relays, processing outcomes, connection events, audit records.
+- `relay/services/telegram_auth.py`: persisted code/2FA state machine with duplicate-identity merge and challenge cleanup.
+- `relay/services/account_lifecycle.py`: user-triggered disconnect (remote logout + credential deletion) and reconnect/health.
+- `relay/services/session_store.py`: encrypted durable session abstraction with key rotation.
 - `relay/services/processing.py`: pure, independently testable transformation pipeline.
 - `relay/services/redis.py`: provider-neutral coordination boundary.
-- `relay/services/worker.py`: long-lived MTProto listener/publisher.
+- `relay/services/worker.py`: long-lived MTProto listener/publisher with per-account backoff and session re-persistence.
 
-The framework is synchronous at its public WSGI boundary; Telethon operations have explicit async boundaries. A future queue can be inserted behind a service interface without changing HTTP contracts or the processing pipeline.
+The public HTTP boundary is ASGI (gunicorn + uvicorn workers); Telethon operations have explicit async boundaries. A future queue can be inserted behind a service interface without changing HTTP contracts or the processing pipeline.
 

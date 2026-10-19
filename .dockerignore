@@ -1,0 +1,16 @@
+.env
+.git
+.github
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.egg-info
+*.pyc
+db.sqlite3
+docs
+tests
+integrations
+backups
+*.session
+*.sql.gz

@@ -10,6 +10,4 @@ A Django REST API plus an independent Telethon worker that republishes transform
 4. Start the API and worker with `docker compose up`.
 5. Open `http://localhost:8000/health/`.
 
-API endpoints are under `/api/`: application auth, Telegram auth, account dialogs, saved entities, relays, and processed messages. See [architecture](docs/architecture.md) and [local development](docs/local-development.md).
-
-# telegram_relay
+API endpoints are versioned under `/api/v1/` (legacy `/api/` alias kept): application auth, Telegram auth (phone → code → 2FA), account management (list, health, events, reconnect, disconnect), dialogs, relays, and processed messages. See [architecture](docs/architecture.md), [website integration](docs/frontend-integration.md), [JustRunMy.App deployment](docs/justrunmyapp.md), [VPS deployment](docs/vps-docker.md), and [local development](docs/local-development.md).
