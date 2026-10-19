@@ -1,0 +1,68 @@
+name: deploy
+
+on:
+  workflow_call:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ vars.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync release to server
+        run: |
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude '.venv' \
+            --exclude 'db.sqlite3' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude '.pytest_cache' \
+            --exclude '.ruff_cache' \
+            -e "ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts" \
+            ./ "${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}:/opt/telegram_relay/"
+
+      - name: Build, migrate, and restart
+        run: |
+          ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}" '
+              set -e
+              cd /opt/telegram_relay
+              echo "==> Building image"
+              docker compose -f docker-compose.vps.yml build
+              echo "==> Applying migrations"
+              docker compose -f docker-compose.vps.yml run --rm --no-deps api python manage.py migrate --noinput
+              echo "==> Recreating api and worker"
+              docker compose -f docker-compose.vps.yml up -d --force-recreate api worker
+              echo "==> Waiting for health"
+              for i in $(seq 1 30); do
+                if curl -fsS http://127.0.0.1:8001/health/live/ >/dev/null 2>&1; then
+                  echo "API healthy after ${i} attempt(s)"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "ERROR: API did not become healthy" >&2
+              docker compose -f docker-compose.vps.yml logs --tail 50 api >&2
+              exit 1
+            '
+
+      - name: Prune dangling images
+        if: always()
+        run: |
+          ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}" \
+            'docker image prune -f >/dev/null 2>&1 || true'

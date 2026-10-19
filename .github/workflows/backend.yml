@@ -26,3 +26,9 @@ jobs:
       - run: pytest
       - run: ruff check .
       - run: docker build .
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    uses: ./.github/workflows/deploy.yml
+    secrets: inherit
