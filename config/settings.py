@@ -138,6 +138,7 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_THROTTLE_RATES": {"anon": "20/min", "user": "120/min", "telegram_auth": "5/min"},
     "EXCEPTION_HANDLER": "relay.responses.exception_handler",
+    "NUM_PROXIES": int(os.environ.get("NUM_PROXIES", "0")) or None,
 }
 SIMPLE_JWT = {
     "SIGNING_KEY": JWT_SECRET_KEY,

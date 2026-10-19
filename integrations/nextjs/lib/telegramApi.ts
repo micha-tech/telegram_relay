@@ -329,25 +329,25 @@ export function createTelegramApi(options: TelegramApiOptions = {}) {
 
     // ---- accounts ---------------------------------------------------------
     listAccounts(): Promise<Paginated<Account>> {
-      return request<Paginated<Account>>("/telegram/accounts");
+      return request<Paginated<Account>>("/telegram/accounts/");
     },
     getAccount(id: string): Promise<Account> {
-      return request<Account>(`/telegram/accounts/${id}`);
+      return request<Account>(`/telegram/accounts/${id}/`);
     },
     getAccountHealth(id: string): Promise<AccountHealth> {
-      return request<AccountHealth>(`/telegram/accounts/${id}/health`);
+      return request<AccountHealth>(`/telegram/accounts/${id}/health/`);
     },
     getAccountEvents(id: string): Promise<ConnectionEvent[]> {
-      return request<ConnectionEvent[]>(`/telegram/accounts/${id}/events`);
+      return request<ConnectionEvent[]>(`/telegram/accounts/${id}/events/`);
     },
     reconnectAccount(id: string): Promise<Account> {
-      return request<Account>(`/telegram/accounts/${id}/reconnect`, { method: "POST" });
+      return request<Account>(`/telegram/accounts/${id}/reconnect/`, { method: "POST" });
     },
     disconnectAccount(id: string): Promise<Account> {
-      return request<Account>(`/telegram/accounts/${id}/disconnect`, { method: "POST" });
+      return request<Account>(`/telegram/accounts/${id}/disconnect/`, { method: "POST" });
     },
     listDialogs(id: string): Promise<Dialog[]> {
-      return request<Dialog[]>(`/telegram/accounts/${id}/dialogs`);
+      return request<Dialog[]>(`/telegram/accounts/${id}/dialogs/`);
     },
   };
 }

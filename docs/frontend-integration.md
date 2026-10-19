@@ -34,13 +34,15 @@ Errors are sanitized (`400` with a human-readable message, e.g. flood-wait secon
 
 ## Account management endpoints
 
-- `GET /telegram/accounts` — paginated list: `id`, `phone_masked`, `telegram_user_id`, `display_name`, `username`, `status`, `last_connected_at`, `last_activity_at`, `last_error`.
-- `GET /telegram/accounts/{id}` — single account.
-- `GET /telegram/accounts/{id}/health` — `status`, `session_present`, `worker_active`, timestamps.
-- `GET /telegram/accounts/{id}/events` — recent connection events (`connected`, `code_sent`, `password_required`, `error`, `revoked`, `disconnected`).
-- `POST /telegram/accounts/{id}/reconnect` — re-attach the worker to a stored session.
-- `POST /telegram/accounts/{id}/disconnect` — revoke the Telegram auth key (best effort), delete the stored session, mark `disconnected`.
-- `GET /telegram/accounts/{id}/dialogs` — sync dialogs into saved entities for relay configuration.
+- `GET /telegram/accounts/` — paginated list: `id`, `phone_masked`, `telegram_user_id`, `display_name`, `username`, `status`, `last_connected_at`, `last_activity_at`, `last_error`.
+- `GET /telegram/accounts/{id}/` — single account.
+- `GET /telegram/accounts/{id}/health/` — `status`, `session_present`, `worker_active`, timestamps.
+- `GET /telegram/accounts/{id}/events/` — recent connection events (`connected`, `code_sent`, `password_required`, `error`, `revoked`, `disconnected`).
+- `POST /telegram/accounts/{id}/reconnect/` — re-attach the worker to a stored session.
+- `POST /telegram/accounts/{id}/disconnect/` — revoke the Telegram auth key (best effort), delete the stored session, mark `disconnected`.
+- `GET /telegram/accounts/{id}/dialogs/` — sync dialogs into saved entities for relay configuration.
+
+Router-based routes (`/telegram/accounts/`, `/telegram/entities/`, `/relays/`, `/messages/`, `/logs/`) **require a trailing slash**; calling one without it returns `301`. Keep the slash — browsers convert a `301` on `POST` into `GET`, which silently breaks write actions.
 
 ## UI requirements
 
