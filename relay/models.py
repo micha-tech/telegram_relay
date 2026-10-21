@@ -168,6 +168,7 @@ class SignalSource(TimestampedModel):
     name = models.CharField(max_length=255, blank=True)
     enabled = models.BooleanField(default=True, db_index=True)
     forward_enabled = models.BooleanField(default=False)
+    capture_all = models.BooleanField(default=False)
     rules = models.JSONField(default=dict)
     backfill_limit = models.PositiveIntegerField(default=200)
     last_scraped_at = models.DateTimeField(null=True, blank=True)

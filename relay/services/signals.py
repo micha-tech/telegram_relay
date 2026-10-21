@@ -99,6 +99,15 @@ def match_keywords(text: str, rules) -> tuple[str, ...]:
     )
 
 
+def should_capture(text: str, source: SignalSource) -> tuple[str, ...]:
+    if getattr(source, "capture_all", False):
+        body = (text or "").strip()
+        if not body:
+            return ()
+        return ("all",)
+    return match_keywords(text, source.rules)
+
+
 def record_signal(
     account,
     source: SignalSource,
@@ -142,10 +151,17 @@ def capture(
     terms=None,
 ) -> Signal | None:
     """Match a message against a source's rules and store it when it matches."""
-    matched = tuple(terms) if terms is not None else match_keywords(text, source.rules)
-    if not matched:
+    body = (text or "")
+    stripped = body.strip()
+    if not stripped:
         return None
-    body = (text or "")[:MAX_TEXT_LENGTH]
+    if getattr(source, "capture_all", False):
+        matched = ("all",)
+    else:
+        matched = tuple(terms) if terms is not None else match_keywords(text, source.rules)
+        if not matched:
+            return None
+    body_truncated = body[:MAX_TEXT_LENGTH]
     try:
         with transaction.atomic():
             signal = Signal.objects.create(
@@ -153,10 +169,10 @@ def capture(
                 source=source,
                 chat_id=chat_id,
                 message_id=message_id,
-                text=body,
+                text=body_truncated,
                 author=(author or "")[:255],
                 author_id=author_id,
-                matched_terms=list(matched),
+                matched_terms=[] if matched == ("all",) else list(matched),
                 sent_at=sent_at or timezone.now(),
             )
     except IntegrityError:

@@ -241,6 +241,7 @@ class SignalSourceSerializer(serializers.ModelSerializer):
             "name",
             "enabled",
             "forward_enabled",
+            "capture_all",
             "rules",
             "backfill_limit",
             "last_scraped_at",
@@ -281,6 +282,12 @@ class SignalSourceSerializer(serializers.ModelSerializer):
         return attrs
 
     def validate_rules(self, value):
+        if self.initial_data.get("capture_all") is True or (
+            isinstance(self.instance, SignalSource) and self.instance.capture_all
+        ):
+            if not isinstance(value, dict):
+                raise serializers.ValidationError("Invalid rules")
+            return value
         serializer = SignalRulesSerializer(data=value)
         serializer.is_valid(raise_exception=True)
         return serializer.validated_data
