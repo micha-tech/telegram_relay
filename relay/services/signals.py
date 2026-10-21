@@ -4,11 +4,50 @@ from dataclasses import dataclass
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
+from telethon.errors import FloodWaitError, RPCError
 
 from relay.models import Signal, SignalSource
 
 DEFAULT_MIN_LENGTH = 0
 MAX_TEXT_LENGTH = 8000
+
+
+def _resolve_peer(client, entity):
+    from .worker import TelegramRelayWorker
+
+    return TelegramRelayWorker()._input_peer(entity)
+
+
+async def forward_signal(
+    client,
+    source: SignalSource,
+    text: str,
+    *,
+    original_chat_id=None,
+    original_message_id=None,
+):
+    """Forward a matched signal to the configured destination channel/chat."""
+    if not source.forward_enabled or not source.forward_to_id:
+        return None
+    destination = source.forward_to
+    if destination is None:
+        return None
+    body = (text or "").strip()
+    if not body:
+        return None
+    try:
+        peer = _resolve_peer(client, destination)
+        return await client.send_message(peer, body, link_preview=False)
+    except (FloodWaitError, RPCError, RuntimeError, ValueError):
+        return None
+    except Exception:
+        return None
+
+
+def _clean_list(value) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
 
 
 @dataclass(frozen=True)
@@ -35,12 +74,6 @@ class SignalRules:
             min_length=max(0, min_length),
             case_sensitive=bool(raw.get("case_sensitive", False)),
         )
-
-
-def _clean_list(value) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(str(item).strip() for item in value if str(item).strip())
 
 
 def match_keywords(text: str, rules) -> tuple[str, ...]:

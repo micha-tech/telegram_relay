@@ -304,7 +304,7 @@ class TelegramRelayWorker:
         author_id = getattr(event, "sender_id", None)
         sent_at = getattr(event, "date", None)
         for source in sources:
-            await sync_to_async(capture)(
+            signal = await sync_to_async(capture)(
                 account,
                 source,
                 chat_id=chat_id,
@@ -314,6 +314,16 @@ class TelegramRelayWorker:
                 author_id=author_id,
                 sent_at=sent_at,
             )
+            if signal is not None and source.forward_enabled and source.forward_to_id:
+                try:
+                    from .signals import forward_signal
+
+                    await forward_signal(client, source, signal.text)  # noqa: F821
+                except Exception:
+                    logger.exception(
+                        "signal_forward_failed",
+                        extra={"source_id": str(source.id), "chat_id": chat_id},
+                    )
 
     async def _run_scrapes(self, account, client):
         """Run queued history backfills for this account with its own client."""
@@ -354,6 +364,16 @@ class TelegramRelayWorker:
             )
             if signal is not None:
                 captured += 1
+                if source.forward_enabled and source.forward_to_id:
+                    try:
+                        from .signals import forward_signal
+
+                        await forward_signal(client, source, signal.text)
+                    except Exception:
+                        logger.exception(
+                            "signal_forward_failed",
+                            extra={"source_id": str(source.id)},
+                        )
         await SignalSource.objects.filter(pk=source.pk).aupdate(
             last_scraped_at=timezone.now()
         )

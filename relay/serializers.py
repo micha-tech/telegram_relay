@@ -219,6 +219,9 @@ class RelaySerializer(serializers.ModelSerializer):
 
 class SignalSourceSerializer(serializers.ModelSerializer):
     rules = serializers.JSONField()
+    forward_to = serializers.PrimaryKeyRelatedField(
+        queryset=TelegramEntity.objects.all(), allow_null=True, required=False
+    )
     chat_title = serializers.SerializerMethodField()
     chat_username = serializers.SerializerMethodField()
     peer_id = serializers.SerializerMethodField()
@@ -231,11 +234,13 @@ class SignalSourceSerializer(serializers.ModelSerializer):
             "account",
             "account_label",
             "entity",
+            "forward_to",
             "chat_title",
             "chat_username",
             "peer_id",
             "name",
             "enabled",
+            "forward_enabled",
             "rules",
             "backfill_limit",
             "last_scraped_at",
@@ -260,10 +265,19 @@ class SignalSourceSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         account = attrs.get("account", getattr(self.instance, "account", None))
         entity = attrs.get("entity", getattr(self.instance, "entity", None))
+        forward_to = attrs.get("forward_to", getattr(self.instance, "forward_to", None))
         if not account:
             raise serializers.ValidationError("Invalid account")
         if not entity or entity.account_id != account.id or entity.kind != "source":
             raise serializers.ValidationError("Invalid chat")
+        if forward_to and forward_to.account_id != account.id:
+            raise serializers.ValidationError(
+                {"forward_to": "Forward target must belong to the same account."}
+            )
+        if forward_to and entity and forward_to.peer_id == entity.peer_id:
+            raise serializers.ValidationError(
+                {"forward_to": "Forward target must be a different chat."}
+            )
         return attrs
 
     def validate_rules(self, value):

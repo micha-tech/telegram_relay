@@ -158,8 +158,16 @@ class SignalSource(TimestampedModel):
     entity = models.ForeignKey(
         TelegramEntity, on_delete=models.CASCADE, related_name="signal_sources"
     )
+    forward_to = models.ForeignKey(
+        TelegramEntity,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_source_forwards",
+    )
     name = models.CharField(max_length=255, blank=True)
     enabled = models.BooleanField(default=True, db_index=True)
+    forward_enabled = models.BooleanField(default=False)
     rules = models.JSONField(default=dict)
     backfill_limit = models.PositiveIntegerField(default=200)
     last_scraped_at = models.DateTimeField(null=True, blank=True)
