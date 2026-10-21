@@ -1,8 +1,12 @@
 import logging
+from datetime import timedelta
 
 from django.contrib.auth import authenticate
 from django.db import IntegrityError, connection
+from django.db.models import Count, Q
 from django.http import JsonResponse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
@@ -15,9 +19,13 @@ from relay.models import (
     AuditLog,
     ProcessedMessage,
     RelayConfiguration,
+    Signal,
+    SignalSource,
     TelegramAccount,
     TelegramEntity,
 )
+from relay.pagination import SignalsPagination
+from relay.permissions import IsSuperAdmin
 from relay.responses import ok
 from relay.serializers import (
     AuditLogSerializer,
@@ -26,6 +34,8 @@ from relay.serializers import (
     ProcessedMessageSerializer,
     RegisterSerializer,
     RelaySerializer,
+    SignalSerializer,
+    SignalSourceSerializer,
     TelegramAccountSerializer,
     TelegramAuth2FASerializer,
     TelegramAuthStartSerializer,
@@ -34,6 +44,7 @@ from relay.serializers import (
 )
 from relay.services.account_lifecycle import AccountLifecycleError, AccountLifecycleService
 from relay.services.redis import RedisService
+from relay.services.scrape_queue import enqueue_scrape
 from relay.services.telegram_auth import TelegramAuthError, TelegramAuthService
 from relay.services.telegram_entities import TelegramEntityService
 
@@ -66,6 +77,14 @@ def tokens(user):
     }
 
 
+def user_payload(user):
+    return {
+        "id": user.id,
+        "email": user.email,
+        "is_superuser": bool(user.is_superuser),
+    }
+
+
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def register(request):
@@ -75,7 +94,7 @@ def register(request):
         user = serializer.save()
     except IntegrityError as exc:
         raise serializers.ValidationError({"email": "An account already exists"}) from exc
-    return ok({"user": {"id": user.id, "email": user.email}, **tokens(user)}, status=201)
+    return ok({"user": user_payload(user), **tokens(user)}, status=201)
 
 
 @api_view(["POST"])
@@ -89,12 +108,12 @@ def login(request):
     )
     if not user:
         raise serializers.ValidationError("Invalid credentials")
-    return ok({"user": {"id": user.id, "email": user.email}, **tokens(user)})
+    return ok({"user": user_payload(user), **tokens(user)})
 
 
 @api_view(["GET"])
 def me(request):
-    return ok({"id": request.user.id, "email": request.user.email})
+    return ok(user_payload(request.user))
 
 
 @api_view(["POST"])
@@ -124,10 +143,13 @@ class EnvelopeMixin:
 
 
 class AccountViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
+    """Operator-only view over every connected Telegram account."""
+
     serializer_class = TelegramAccountSerializer
+    permission_classes = [IsSuperAdmin]
 
     def get_queryset(self):
-        return TelegramAccount.objects.filter(user=self.request.user).order_by("created_at")
+        return TelegramAccount.objects.select_related("user").order_by("created_at")
 
     @action(detail=True, methods=["post"])
     def disconnect(self, request, pk=None):
@@ -176,9 +198,148 @@ class AccountViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
 
 class EntityViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = TelegramEntitySerializer
+    permission_classes = [IsSuperAdmin]
 
     def get_queryset(self):
-        return TelegramEntity.objects.filter(user=self.request.user)
+        return TelegramEntity.objects.select_related("account", "user")
+
+
+class SignalViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
+    """Scraped signals. Every authenticated user can read the feed."""
+
+    serializer_class = SignalSerializer
+    pagination_class = SignalsPagination
+
+    def get_queryset(self):
+        queryset = Signal.objects.select_related(
+            "account", "source", "source__entity"
+        )
+        params = self.request.query_params
+        account = params.get("account")
+        if account:
+            queryset = queryset.filter(account_id=account)
+        source = params.get("source")
+        if source:
+            queryset = queryset.filter(source_id=source)
+        chat_id = params.get("chat_id")
+        if chat_id:
+            queryset = queryset.filter(chat_id=chat_id)
+        text = (params.get("q") or "").strip()
+        if text:
+            queryset = queryset.filter(text__icontains=text)
+        since = params.get("since")
+        if since:
+            moment = parse_datetime(since)
+            if moment:
+                if timezone.is_naive(moment):
+                    moment = timezone.make_aware(moment, timezone.get_current_timezone())
+                queryset = queryset.filter(
+                    Q(sent_at__gte=moment)
+                    | Q(sent_at__isnull=True, created_at__gte=moment)
+                )
+        return queryset.order_by("-sent_at", "-created_at")
+
+    @action(detail=False, methods=["get"])
+    def stats(self, request):
+        queryset = self.get_queryset()
+        now = timezone.now()
+        total = queryset.count()
+        last_24h = queryset.filter(sent_at__gte=now - timedelta(hours=24)).count()
+        by_source = [
+            {
+                "source_id": str(row["source_id"]),
+                "name": row["source__name"] or row["source__entity__title"] or "",
+                "count": row["count"],
+            }
+            for row in queryset.values(
+                "source_id", "source__name", "source__entity__title"
+            )
+            .annotate(count=Count("id"))
+            .order_by("-count")[:20]
+        ]
+        by_account = [
+            {
+                "account_id": str(row["account_id"]),
+                "name": row["account__display_name"] or "",
+                "count": row["count"],
+            }
+            for row in queryset.values("account_id", "account__display_name")
+            .annotate(count=Count("id"))
+            .order_by("-count")[:20]
+        ]
+        return ok(
+            {
+                "total": total,
+                "last_24h": last_24h,
+                "active_sources": SignalSource.objects.filter(enabled=True).count(),
+                "by_source": by_source,
+                "by_account": by_account,
+            }
+        )
+
+
+class SignalSourceViewSet(EnvelopeMixin, viewsets.ModelViewSet):
+    """Watched chats and their keyword rules. Super administrators only."""
+
+    serializer_class = SignalSourceSerializer
+    permission_classes = [IsSuperAdmin]
+
+    def get_queryset(self):
+        return SignalSource.objects.select_related("account", "entity").order_by("created_at")
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        source = serializer.save()
+        AuditLog.objects.create(
+            user=request.user,
+            action="signal_source.created",
+            object_type="signal_source",
+            object_id=source.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+        return ok(self.get_serializer(source).data, status=201)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        source = serializer.save()
+        AuditLog.objects.create(
+            user=request.user,
+            action="signal_source.updated",
+            object_type="signal_source",
+            object_id=source.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+        return ok(self.get_serializer(source).data)
+
+    def destroy(self, request, *args, **kwargs):
+        source = self.get_object()
+        self.perform_destroy(source)
+        AuditLog.objects.create(
+            user=request.user,
+            action="signal_source.deleted",
+            object_type="signal_source",
+            object_id=source.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+        return ok(message="Signal source deleted")
+
+    @action(detail=True, methods=["post"])
+    def scrape(self, request, pk=None):
+        """Queue a history backfill for this source; the worker performs it."""
+        source = self.get_object()
+        enqueue_scrape(source.account_id, source.id)
+        AuditLog.objects.create(
+            user=request.user,
+            action="signal_source.scrape_requested",
+            object_type="signal_source",
+            object_id=source.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+        return ok({"queued": True, "source_id": str(source.id)}, status=202)
 
 
 class RelayViewSet(EnvelopeMixin, viewsets.ModelViewSet):
@@ -264,6 +425,7 @@ class TelegramAuthThrottle(ScopedRateThrottle):
 
 @api_view(["POST"])
 @throttle_classes([TelegramAuthThrottle])
+@permission_classes([IsSuperAdmin])
 def telegram_auth_start(request):
     serializer = TelegramAuthStartSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -287,6 +449,7 @@ def telegram_auth_start(request):
 
 @api_view(["POST"])
 @throttle_classes([TelegramAuthThrottle])
+@permission_classes([IsSuperAdmin])
 def telegram_auth_verify(request):
     serializer = TelegramAuthVerifySerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -304,6 +467,7 @@ def telegram_auth_verify(request):
 
 @api_view(["POST"])
 @throttle_classes([TelegramAuthThrottle])
+@permission_classes([IsSuperAdmin])
 def telegram_auth_2fa(request):
     serializer = TelegramAuth2FASerializer(data=request.data)
     serializer.is_valid(raise_exception=True)

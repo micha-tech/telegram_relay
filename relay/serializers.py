@@ -6,11 +6,30 @@ from relay.models import (
     AuditLog,
     ProcessedMessage,
     RelayConfiguration,
+    Signal,
+    SignalSource,
     TelegramAccount,
     TelegramEntity,
 )
 
 User = get_user_model()
+
+
+def mask_phone(phone: str) -> str:
+    """Mask a phone number, keeping only the country prefix and last four digits."""
+    value = phone or ""
+    if len(value) <= 4:
+        return "+" * len(value)
+    return f"{value[0]}{'•' * (len(value) - 4)}{value[-4:]}"
+
+
+def account_label(account: TelegramAccount) -> str:
+    """Human readable label for an account, without exposing the phone number."""
+    if account.display_name:
+        return account.display_name
+    if account.username:
+        return f"@{account.username}"
+    return mask_phone(account.phone_number)
 
 
 class RegisterSerializer(serializers.Serializer):
@@ -91,6 +110,32 @@ class RelayRulesSerializer(serializers.Serializer):
         return result
 
 
+class SignalRulesSerializer(serializers.Serializer):
+    keywords = serializers.ListField(
+        child=serializers.CharField(max_length=200),
+        max_length=100,
+        allow_empty=False,
+        error_messages={"empty": "Add at least one keyword to watch for."},
+    )
+    blocked_phrases = serializers.ListField(
+        child=serializers.CharField(max_length=500), required=False, max_length=100
+    )
+    min_length = serializers.IntegerField(required=False, min_value=0, max_value=4000)
+    case_sensitive = serializers.BooleanField(required=False)
+
+    def validate(self, attrs):
+        unknown = set(self.initial_data) - set(self.fields)
+        if unknown:
+            raise serializers.ValidationError(f"Unknown rule keys: {', '.join(sorted(unknown))}")
+        return attrs
+
+    def validate_keywords(self, value):
+        cleaned = [item.strip() for item in value if item.strip()]
+        if not cleaned:
+            raise serializers.ValidationError("Add at least one keyword to watch for.")
+        return cleaned
+
+
 class TelegramAccountSerializer(serializers.ModelSerializer):
     phone_masked = serializers.SerializerMethodField()
 
@@ -111,10 +156,7 @@ class TelegramAccountSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_phone_masked(self, obj) -> str:
-        phone = obj.phone_number or ""
-        if len(phone) <= 4:
-            return "+" * len(phone)
-        return f"{phone[0]}{'•' * (len(phone) - 4)}{phone[-4:]}"
+        return mask_phone(obj.phone_number or "")
 
 
 class TelegramEntitySerializer(serializers.ModelSerializer):
@@ -173,6 +215,92 @@ class RelaySerializer(serializers.ModelSerializer):
         serializer = RelayRulesSerializer(data=value)
         serializer.is_valid(raise_exception=True)
         return serializer.validated_data
+
+
+class SignalSourceSerializer(serializers.ModelSerializer):
+    rules = serializers.JSONField()
+    chat_title = serializers.SerializerMethodField()
+    chat_username = serializers.SerializerMethodField()
+    peer_id = serializers.SerializerMethodField()
+    account_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SignalSource
+        fields = [
+            "id",
+            "account",
+            "account_label",
+            "entity",
+            "chat_title",
+            "chat_username",
+            "peer_id",
+            "name",
+            "enabled",
+            "rules",
+            "backfill_limit",
+            "last_scraped_at",
+            "last_signal_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["last_scraped_at", "last_signal_at", "created_at", "updated_at"]
+
+    def get_chat_title(self, obj) -> str:
+        return obj.entity.title or ""
+
+    def get_chat_username(self, obj) -> str:
+        return obj.entity.username or ""
+
+    def get_peer_id(self, obj) -> int:
+        return obj.entity.peer_id
+
+    def get_account_label(self, obj) -> str:
+        return account_label(obj.account)
+
+    def validate(self, attrs):
+        account = attrs.get("account", getattr(self.instance, "account", None))
+        entity = attrs.get("entity", getattr(self.instance, "entity", None))
+        if not account:
+            raise serializers.ValidationError("Invalid account")
+        if not entity or entity.account_id != account.id or entity.kind != "source":
+            raise serializers.ValidationError("Invalid chat")
+        return attrs
+
+    def validate_rules(self, value):
+        serializer = SignalRulesSerializer(data=value)
+        serializer.is_valid(raise_exception=True)
+        return serializer.validated_data
+
+
+class SignalSerializer(serializers.ModelSerializer):
+    source_name = serializers.SerializerMethodField()
+    account_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Signal
+        fields = [
+            "id",
+            "account",
+            "account_label",
+            "source",
+            "source_name",
+            "chat_id",
+            "message_id",
+            "text",
+            "author",
+            "author_id",
+            "matched_terms",
+            "sent_at",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_source_name(self, obj) -> str:
+        source = obj.source
+        return source.name or source.entity.title or source.entity.username or ""
+
+    def get_account_label(self, obj) -> str:
+        return account_label(obj.account)
 
 
 class ProcessedMessageSerializer(serializers.ModelSerializer):

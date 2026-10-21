@@ -60,9 +60,37 @@ def test_protected_endpoint_requires_authentication():
 @pytest.mark.django_db
 def test_telegram_auth_rejects_non_e164_phone_before_service_call():
     user = get_user_model().objects.create_user(
-        username="person@example.com", password="a-strong-password-123"
+        username="person@example.com",
+        password="a-strong-password-123",
+        is_superuser=True,
+        is_staff=True,
     )
     client = APIClient()
     client.force_authenticate(user)
     response = client.post("/api/telegram/auth/start", {"phone_number": "555-1234"}, format="json")
     assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_telegram_auth_requires_super_admin():
+    user = get_user_model().objects.create_user(
+        username="regular@example.com", password="a-strong-password-123"
+    )
+    client = APIClient()
+    client.force_authenticate(user)
+    response = client.post(
+        "/api/telegram/auth/start", {"phone_number": "+15551234567"}, format="json"
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_me_reports_super_admin_status():
+    user = get_user_model().objects.create_user(
+        username="admin@example.com", password="a-strong-password-123", is_superuser=True
+    )
+    client = APIClient()
+    client.force_authenticate(user)
+    response = client.get("/api/auth/me")
+    assert response.status_code == 200
+    assert response.data["data"]["is_superuser"] is True

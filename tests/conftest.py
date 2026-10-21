@@ -41,7 +41,11 @@ def user(db):
     from django.contrib.auth import get_user_model
 
     return get_user_model().objects.create_user(
-        username="person@example.com", email="person@example.com", password="password-12345"
+        username="person@example.com",
+        email="person@example.com",
+        password="password-12345",
+        is_superuser=True,
+        is_staff=True,
     )
 
 
@@ -50,7 +54,22 @@ def other_user(db):
     from django.contrib.auth import get_user_model
 
     return get_user_model().objects.create_user(
-        username="other@example.com", email="other@example.com", password="password-12345"
+        username="other@example.com",
+        email="other@example.com",
+        password="password-12345",
+        is_superuser=True,
+        is_staff=True,
+    )
+
+
+@pytest.fixture
+def regular_user(db):
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.create_user(
+        username="regular@example.com",
+        email="regular@example.com",
+        password="password-12345",
     )
 
 

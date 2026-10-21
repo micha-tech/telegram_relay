@@ -39,14 +39,28 @@ def test_reconnect_restores_connected_status(connected_account, telegram_env):
     assert result.status == TelegramAccount.Status.CONNECTED
 
 
-def test_account_endpoints_enforce_ownership(connected_account, other_user, client, telegram_env):
-    client.force_authenticate(other_user)
+def test_account_endpoints_require_super_admin(
+    connected_account, regular_user, client, telegram_env
+):
+    client.force_authenticate(regular_user)
+    response = client.get("/api/v1/telegram/accounts/")
+    assert response.status_code == 403
     response = client.get(f"/api/v1/telegram/accounts/{connected_account.pk}/")
-    assert response.status_code == 404
+    assert response.status_code == 403
     response = client.post(f"/api/v1/telegram/accounts/{connected_account.pk}/disconnect/")
-    assert response.status_code == 404
-    response = client.post(f"/api/v1/telegram/accounts/{connected_account.pk}/reconnect/")
-    assert response.status_code == 404
+    assert response.status_code == 403
+
+
+def test_super_admin_sees_accounts_from_every_owner(user, other_user, client, telegram_env):
+    TelegramAccount.objects.create(
+        user=other_user,
+        phone_number="+15559998888",
+        status=TelegramAccount.Status.CONNECTED,
+    )
+    client.force_authenticate(user)
+    response = client.get("/api/v1/telegram/accounts/")
+    assert response.status_code == 200
+    assert response.data["data"]["count"] == 1
 
 
 def test_account_list_masks_phone_and_hides_session(connected_account, client, telegram_env):

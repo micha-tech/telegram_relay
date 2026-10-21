@@ -13,11 +13,18 @@ from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
 from telethon.tl.types import InputPeerChannel, InputPeerChat, InputPeerUser
 
-from relay.models import ProcessedMessage, RelayConfiguration, TelegramAccount
+from relay.models import (
+    ProcessedMessage,
+    RelayConfiguration,
+    SignalSource,
+    TelegramAccount,
+)
 
 from .crypto import SecretBox
 from .processing import MessageProcessor, TelegramMessage
+from .scrape_queue import scrape_queue_key
 from .session_store import TelegramSessionStore
+from .signals import capture
 from .telegram_auth import record_event
 
 logger = logging.getLogger(__name__)
@@ -183,6 +190,7 @@ class TelegramRelayWorker:
                 )
                 if status != TelegramAccount.Status.CONNECTED:
                     break
+                await self._run_scrapes(account, client)
                 await asyncio.sleep(5)
         except asyncio.CancelledError:
             raise
@@ -278,6 +286,81 @@ class TelegramRelayWorker:
                 await TelegramAccount.objects.filter(pk=account.pk).aupdate(
                     last_activity_at=timezone.now()
                 )
+        await self._capture_signals(account, chat_id, event)
+
+    async def _capture_signals(self, account, chat_id, event):
+        """Store keyword-matched messages from watched chats as signals."""
+        sources = [
+            source
+            async for source in SignalSource.objects.filter(
+                account=account, entity__peer_id=chat_id, enabled=True
+            ).select_related("entity")
+        ]
+        if not sources:
+            return
+        text = getattr(event, "raw_text", "") or ""
+        message = getattr(event, "message", None)
+        author = getattr(message, "post_author", "") or ""
+        author_id = getattr(event, "sender_id", None)
+        sent_at = getattr(event, "date", None)
+        for source in sources:
+            await sync_to_async(capture)(
+                account,
+                source,
+                chat_id=chat_id,
+                message_id=event.id,
+                text=text,
+                author=author,
+                author_id=author_id,
+                sent_at=sent_at,
+            )
+
+    async def _run_scrapes(self, account, client):
+        """Run queued history backfills for this account with its own client."""
+        requests = await self.redis.lpop(scrape_queue_key(account.pk), 5)
+        if not requests:
+            return
+        if isinstance(requests, str):
+            requests = [requests]
+        for source_id in requests:
+            try:
+                await self._scrape_source(account, client, source_id)
+            except Exception:
+                logger.exception(
+                    "signal_scrape_failed", extra={"source_id": str(source_id)}
+                )
+
+    async def _scrape_source(self, account, client, source_id):
+        source = (
+            await SignalSource.objects.filter(pk=source_id, account=account)
+            .select_related("entity")
+            .afirst()
+        )
+        if source is None or not source.enabled:
+            return
+        peer = self._input_peer(source.entity)
+        limit = source.backfill_limit or 200
+        captured = 0
+        async for message in client.iter_messages(peer, limit=limit):
+            signal = await sync_to_async(capture)(
+                account,
+                source,
+                chat_id=source.entity.peer_id,
+                message_id=message.id,
+                text=getattr(message, "raw_text", "") or "",
+                author=getattr(message, "post_author", "") or "",
+                author_id=getattr(message, "sender_id", None),
+                sent_at=getattr(message, "date", None),
+            )
+            if signal is not None:
+                captured += 1
+        await SignalSource.objects.filter(pk=source.pk).aupdate(
+            last_scraped_at=timezone.now()
+        )
+        logger.info(
+            "signal_source_scraped",
+            extra={"source_id": str(source.pk), "captured": captured},
+        )
 
     @sync_to_async
     def _claim(self, account, relay, chat_id, message_id):

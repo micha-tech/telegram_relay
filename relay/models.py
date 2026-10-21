@@ -149,6 +149,57 @@ class ProcessedMessage(TimestampedModel):
         ]
 
 
+class SignalSource(TimestampedModel):
+    """A watched Telegram chat plus the keyword rules that turn its messages into signals."""
+
+    account = models.ForeignKey(
+        TelegramAccount, on_delete=models.CASCADE, related_name="signal_sources"
+    )
+    entity = models.ForeignKey(
+        TelegramEntity, on_delete=models.CASCADE, related_name="signal_sources"
+    )
+    name = models.CharField(max_length=255, blank=True)
+    enabled = models.BooleanField(default=True, db_index=True)
+    rules = models.JSONField(default=dict)
+    backfill_limit = models.PositiveIntegerField(default=200)
+    last_scraped_at = models.DateTimeField(null=True, blank=True)
+    last_signal_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["account", "entity"], name="uniq_account_signal_source")
+        ]
+        indexes = [
+            models.Index(fields=["account", "enabled"]),
+        ]
+
+
+class Signal(TimestampedModel):
+    """A keyword-matched Telegram message captured from a watched chat."""
+
+    account = models.ForeignKey(TelegramAccount, on_delete=models.CASCADE, related_name="signals")
+    source = models.ForeignKey(SignalSource, on_delete=models.CASCADE, related_name="signals")
+    chat_id = models.BigIntegerField()
+    message_id = models.BigIntegerField()
+    text = models.TextField()
+    author = models.CharField(max_length=255, blank=True)
+    author_id = models.BigIntegerField(null=True, blank=True)
+    matched_terms = models.JSONField(default=list)
+    sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["account", "chat_id", "message_id"], name="uniq_account_chat_message"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["-sent_at"]),
+            models.Index(fields=["source", "-sent_at"]),
+            models.Index(fields=["account", "-sent_at"]),
+        ]
+
+
 class AuditLog(TimestampedModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
     action = models.CharField(max_length=100, db_index=True)

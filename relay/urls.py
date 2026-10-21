@@ -10,6 +10,8 @@ router.register("telegram/entities", views.EntityViewSet, basename="entities")
 router.register("relays", views.RelayViewSet, basename="relays")
 router.register("messages", views.MessageViewSet, basename="messages")
 router.register("logs", views.AuditLogViewSet, basename="logs")
+router.register("signals", views.SignalViewSet, basename="signals")
+router.register("signal-sources", views.SignalSourceViewSet, basename="signal_sources")
 urlpatterns = [
     path("auth/register", views.register),
     path("auth/login", views.login),
