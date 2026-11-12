@@ -2,12 +2,21 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 
-from relay.models import ProcessedMessage, RelayConfiguration, TelegramAccount, TelegramEntity
+from relay.models import (
+    Membership,
+    ProcessedMessage,
+    RelayConfiguration,
+    TelegramAccount,
+    TelegramEntity,
+    Tenant,
+)
 
 
 @pytest.mark.django_db
 def test_processed_message_idempotency_constraint():
     user = get_user_model().objects.create_user("u@example.com", password="password")
+    tenant = Tenant.objects.create(name="Test", slug="test")
+    Membership.objects.create(user=user, tenant=tenant, role=Membership.Role.OWNER)
     account = TelegramAccount.objects.create(user=user, phone_number="+100000000")
     source = TelegramEntity.objects.create(
         user=user, account=account, kind="source", peer_id=-1001, entity_type="channel"

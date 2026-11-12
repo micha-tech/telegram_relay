@@ -20,6 +20,7 @@ from telethon.sessions import StringSession
 from relay.models import (
     AccountConnectionEvent,
     AuthenticationChallenge,
+    Membership,
     TelegramAccount,
     TelegramSession,
 )
@@ -81,8 +82,17 @@ class TelegramAuthService:
             return async_to_sync(self._start)(user, phone_number, request_id)
 
     async def _start(self, user, phone_number, request_id=""):
+        membership = (
+            await Membership.objects.filter(user=user).only("tenant_id").afirst()
+        )
+        if membership is None:
+            raise TelegramAuthError(
+                "Your account is not attached to a workspace yet, try again"
+            )
         account, _ = await TelegramAccount.objects.aget_or_create(
-            user=user, phone_number=phone_number
+            user=user,
+            phone_number=phone_number,
+            defaults={"tenant_id": membership.tenant_id},
         )
         await AuthenticationChallenge.objects.filter(
             user=user,

@@ -47,3 +47,30 @@ Router-based routes (`/telegram/accounts/`, `/telegram/entities/`, `/relays/`, `
 ## UI requirements
 
 Use the website's existing design system. A Telegram Accounts section needs: Connect button → phone → code → optional 2FA password → success; account list with status badges, masked phone, last activity, reconnect and disconnect actions; loading, empty, and error states; recovery from expired challenges (offer "start again" once `expires_at` passes). Never render session strings or raw phone numbers.
+
+## Workspaces (multi-tenancy)
+
+Every account belongs to a workspace. Signup creates one by default; joining an
+existing workspace requires an invite code. See
+[`docs/multi-tenancy.md`](multi-tenancy.md) for the full model.
+
+```ts
+// New workspace: the caller becomes its owner ("super admin" of that workspace)
+await telegramApi.register("founder@example.com", "…", { tenantName: "Acme" });
+
+// Join an existing workspace with an invite code
+await telegramApi.register("friend@example.com", "…", { inviteCode: code });
+```
+
+`auth/me` and the register/login payload include `role` and `tenant`:
+
+```json
+{ "id": 1, "email": "…", "is_superuser": false,
+  "role": "owner",
+  "tenant": { "id": "…", "name": "Acme", "slug": "acme" } }
+```
+
+Gate administrative UI on `role === "owner" || role === "admin"` (not on
+`is_superuser`, which is platform-level). Members see only their workspace's
+signal feed. Workspace management lives under `/tenant/…` — see the endpoint
+table in `docs/multi-tenancy.md`.

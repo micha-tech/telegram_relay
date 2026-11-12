@@ -13,6 +13,74 @@ class TimestampedModel(models.Model):
         abstract = True
 
 
+class Tenant(TimestampedModel):
+    """An isolated workspace. Every user belongs to exactly one tenant."""
+
+    name = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=80, unique=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Membership(TimestampedModel):
+    """Links a user to their tenant and records their role inside it."""
+
+    class Role(models.TextChoices):
+        OWNER = "owner"
+        ADMIN = "admin"
+        MEMBER = "member"
+
+    ADMIN_ROLES = (Role.OWNER, Role.ADMIN)
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="membership"
+    )
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="memberships")
+    role = models.CharField(
+        max_length=16, choices=Role.choices, default=Role.MEMBER, db_index=True
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "user"], name="uniq_tenant_user")
+        ]
+        indexes = [models.Index(fields=["tenant", "role"])]
+
+
+class Invite(TimestampedModel):
+    """A single-use, expiring code that lets someone join an existing tenant."""
+
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="invites")
+    code = models.CharField(max_length=64, unique=True, db_index=True)
+    role = models.CharField(
+        max_length=16, choices=Membership.Role.choices, default=Membership.Role.MEMBER
+    )
+    email = models.EmailField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="created_invites",
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    used_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="used_invites",
+    )
+
+    @property
+    def is_usable(self) -> bool:
+        from django.utils import timezone
+
+        return self.used_at is None and self.expires_at > timezone.now()
+
+
 class TelegramAccount(TimestampedModel):
     class Status(models.TextChoices):
         PENDING = "pending"
@@ -23,6 +91,9 @@ class TelegramAccount(TimestampedModel):
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="telegram_accounts"
+    )
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.PROTECT, related_name="telegram_accounts", db_index=True
     )
     telegram_user_id = models.BigIntegerField(null=True, blank=True)
     phone_number = models.CharField(max_length=32)
@@ -44,6 +115,17 @@ class TelegramAccount(TimestampedModel):
                 name="uniq_user_telegram_user",
             ),
         ]
+        indexes = [models.Index(fields=["tenant", "status"])]
+
+    def save(self, *args, **kwargs):
+        """Inherit the owner's tenant so accounts can never be unscoped."""
+        if self.tenant_id is None and self.user_id:
+            membership = (
+                Membership.objects.filter(user_id=self.user_id).only("tenant_id").first()
+            )
+            if membership is not None:
+                self.tenant_id = membership.tenant_id
+        super().save(*args, **kwargs)
 
 
 class TelegramSession(TimestampedModel):
@@ -150,7 +232,7 @@ class ProcessedMessage(TimestampedModel):
 
 
 class SignalSource(TimestampedModel):
-    """A watched Telegram chat plus the keyword rules that turn its messages into signals."""
+    """A watched Telegram chat whose messages are captured as signals."""
 
     account = models.ForeignKey(
         TelegramAccount, on_delete=models.CASCADE, related_name="signal_sources"
@@ -168,8 +250,6 @@ class SignalSource(TimestampedModel):
     name = models.CharField(max_length=255, blank=True)
     enabled = models.BooleanField(default=True, db_index=True)
     forward_enabled = models.BooleanField(default=False)
-    capture_all = models.BooleanField(default=False)
-    rules = models.JSONField(default=dict)
     backfill_limit = models.PositiveIntegerField(default=200)
     last_scraped_at = models.DateTimeField(null=True, blank=True)
     last_signal_at = models.DateTimeField(null=True, blank=True)
@@ -184,7 +264,7 @@ class SignalSource(TimestampedModel):
 
 
 class Signal(TimestampedModel):
-    """A keyword-matched Telegram message captured from a watched chat."""
+    """A Telegram message captured from a watched chat."""
 
     account = models.ForeignKey(TelegramAccount, on_delete=models.CASCADE, related_name="signals")
     source = models.ForeignKey(SignalSource, on_delete=models.CASCADE, related_name="signals")
@@ -193,7 +273,6 @@ class Signal(TimestampedModel):
     text = models.TextField()
     author = models.CharField(max_length=255, blank=True)
     author_id = models.BigIntegerField(null=True, blank=True)
-    matched_terms = models.JSONField(default=list)
     sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:

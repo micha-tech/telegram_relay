@@ -1,6 +1,4 @@
-"""Keyword matching and idempotent capture of Telegram messages as signals."""
-
-from dataclasses import dataclass
+"""Idempotent capture of Telegram messages as signals."""
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -8,7 +6,6 @@ from telethon.errors import FloodWaitError, RPCError
 
 from relay.models import Signal, SignalSource
 
-DEFAULT_MIN_LENGTH = 0
 MAX_TEXT_LENGTH = 8000
 
 
@@ -26,7 +23,7 @@ async def forward_signal(
     original_chat_id=None,
     original_message_id=None,
 ):
-    """Forward a matched signal to the configured destination channel/chat."""
+    """Forward a captured signal to the configured destination channel/chat."""
     if not source.forward_enabled or not source.forward_to_id:
         return None
     destination = source.forward_to
@@ -42,70 +39,6 @@ async def forward_signal(
         return None
     except Exception:
         return None
-
-
-def _clean_list(value) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(str(item).strip() for item in value if str(item).strip())
-
-
-@dataclass(frozen=True)
-class SignalRules:
-    """Normalised keyword rules for a watched chat."""
-
-    keywords: tuple[str, ...] = ()
-    blocked_phrases: tuple[str, ...] = ()
-    min_length: int = DEFAULT_MIN_LENGTH
-    case_sensitive: bool = False
-
-    @classmethod
-    def from_dict(cls, rules) -> "SignalRules":
-        raw = rules or {}
-        keywords = _clean_list(raw.get("keywords"))
-        blocked_phrases = _clean_list(raw.get("blocked_phrases"))
-        try:
-            min_length = int(raw.get("min_length") or DEFAULT_MIN_LENGTH)
-        except (TypeError, ValueError):
-            min_length = DEFAULT_MIN_LENGTH
-        return cls(
-            keywords=keywords,
-            blocked_phrases=blocked_phrases,
-            min_length=max(0, min_length),
-            case_sensitive=bool(raw.get("case_sensitive", False)),
-        )
-
-
-def match_keywords(text: str, rules) -> tuple[str, ...]:
-    """Return the keywords present in text; an empty tuple means "not a signal"."""
-    parsed = SignalRules.from_dict(rules)
-    if not parsed.keywords:
-        return ()
-    body = text or ""
-    stripped = body.strip()
-    if not stripped:
-        return ()
-    if parsed.min_length and len(stripped) < parsed.min_length:
-        return ()
-    haystack = body if parsed.case_sensitive else body.casefold()
-    for phrase in parsed.blocked_phrases:
-        needle = phrase if parsed.case_sensitive else phrase.casefold()
-        if needle in haystack:
-            return ()
-    return tuple(
-        keyword
-        for keyword in parsed.keywords
-        if (keyword if parsed.case_sensitive else keyword.casefold()) in haystack
-    )
-
-
-def should_capture(text: str, source: SignalSource) -> tuple[str, ...]:
-    if getattr(source, "capture_all", False):
-        body = (text or "").strip()
-        if not body:
-            return ()
-        return ("all",)
-    return match_keywords(text, source.rules)
 
 
 def record_signal(
@@ -131,7 +64,6 @@ def record_signal(
                 text=body,
                 author=(author or "")[:255],
                 author_id=author_id,
-                matched_terms=[],
                 sent_at=sent_at or timezone.now(),
             )
     except IntegrityError:
@@ -148,19 +80,11 @@ def capture(
     author: str = "",
     author_id: int | None = None,
     sent_at=None,
-    terms=None,
 ) -> Signal | None:
-    """Match a message against a source's rules and store it when it matches."""
+    """Capture a message from a watched chat as a signal."""
     body = (text or "")
-    stripped = body.strip()
-    if not stripped:
+    if not body.strip():
         return None
-    if getattr(source, "capture_all", False):
-        matched = ("all",)
-    else:
-        matched = tuple(terms) if terms is not None else match_keywords(text, source.rules)
-        if not matched:
-            return None
     body_truncated = body[:MAX_TEXT_LENGTH]
     try:
         with transaction.atomic():
@@ -172,7 +96,6 @@ def capture(
                 text=body_truncated,
                 author=(author or "")[:255],
                 author_id=author_id,
-                matched_terms=[] if matched == ("all",) else list(matched),
                 sent_at=sent_at or timezone.now(),
             )
     except IntegrityError:

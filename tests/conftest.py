@@ -37,48 +37,57 @@ def telegram_env(monkeypatch):
 
 
 @pytest.fixture
-def user(db):
+def tenant(db):
+    from relay.models import Tenant
+
+    return Tenant.objects.create(name="Test Workspace", slug="test-workspace")
+
+
+def make_member(email, tenant, role):
     from django.contrib.auth import get_user_model
 
-    return get_user_model().objects.create_user(
-        username="person@example.com",
-        email="person@example.com",
+    from relay.models import Membership
+
+    user = get_user_model().objects.create_user(
+        username=email,
+        email=email,
         password="password-12345",
-        is_superuser=True,
-        is_staff=True,
+        is_superuser=role == Membership.Role.OWNER,
+        is_staff=role == Membership.Role.OWNER,
     )
+    Membership.objects.create(user=user, tenant=tenant, role=role)
+    return user
+
+
+@pytest.fixture
+def user(tenant):
+    from relay.models import Membership
+
+    return make_member("person@example.com", tenant, Membership.Role.OWNER)
 
 
 @pytest.fixture
 def other_user(db):
-    from django.contrib.auth import get_user_model
+    from relay.models import Membership, Tenant
 
-    return get_user_model().objects.create_user(
-        username="other@example.com",
-        email="other@example.com",
-        password="password-12345",
-        is_superuser=True,
-        is_staff=True,
-    )
+    other_tenant = Tenant.objects.create(name="Other Workspace", slug="other-workspace")
+    return make_member("other@example.com", other_tenant, Membership.Role.OWNER)
 
 
 @pytest.fixture
-def regular_user(db):
-    from django.contrib.auth import get_user_model
+def regular_user(tenant):
+    from relay.models import Membership
 
-    return get_user_model().objects.create_user(
-        username="regular@example.com",
-        email="regular@example.com",
-        password="password-12345",
-    )
+    return make_member("regular@example.com", tenant, Membership.Role.MEMBER)
 
 
 @pytest.fixture
-def account(user):
+def account(user, tenant):
     from relay.models import TelegramAccount
 
     return TelegramAccount.objects.create(
         user=user,
+        tenant=tenant,
         phone_number="+15551234567",
         telegram_user_id=999,
         status=TelegramAccount.Status.CONNECTED,

@@ -12,12 +12,16 @@ router.register("messages", views.MessageViewSet, basename="messages")
 router.register("logs", views.AuditLogViewSet, basename="logs")
 router.register("signals", views.SignalViewSet, basename="signals")
 router.register("signal-sources", views.SignalSourceViewSet, basename="signal_sources")
+router.register("tenant/members", views.MemberViewSet, basename="members")
+router.register("tenant/invites", views.InviteViewSet, basename="invites")
+router.register("tenant", views.TenantViewSet, basename="tenant")
 urlpatterns = [
     path("auth/register", views.register),
     path("auth/login", views.login),
     path("auth/logout", views.logout),
     path("auth/refresh", TokenRefreshView.as_view()),
     path("auth/me", views.me),
+    path("auth/invites/<str:code>", views.invite_preview),
     path("telegram/auth/start", views.telegram_auth_start),
     path("telegram/auth/verify", views.telegram_auth_verify),
     path("telegram/auth/2fa", views.telegram_auth_2fa),

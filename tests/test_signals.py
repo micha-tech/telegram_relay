@@ -1,11 +1,9 @@
 import pytest
 
 from relay.models import Signal, SignalSource, TelegramEntity
-from relay.services.signals import capture, match_keywords
+from relay.services.signals import capture
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("no_redis")]
-
-RULES = {"keywords": ["over 2.5", "first half", "banker"]}
 
 
 @pytest.fixture
@@ -24,44 +22,11 @@ def entity(account):
 @pytest.fixture
 def source(account, entity):
     return SignalSource.objects.create(
-        account=account, entity=entity, name="Signals Group", enabled=True, rules=RULES
+        account=account, entity=entity, name="Signals Group", enabled=True
     )
 
 
-def test_keyword_match_is_case_insensitive():
-    assert match_keywords("BET Over 2.5 Goals today", RULES) == ("over 2.5",)
-
-
-def test_multiple_keywords_are_reported():
-    matched = match_keywords("Banker bet, first half goal", RULES)
-    assert set(matched) == {"first half", "banker"}
-
-
-def test_message_without_keyword_is_not_a_signal():
-    assert match_keywords("Good morning everyone", RULES) == ()
-
-
-def test_blocked_phrase_suppresses_the_signal():
-    rules = {**RULES, "blocked_phrases": ["spoiler"]}
-    assert match_keywords("Over 2.5 spoiler", rules) == ()
-
-
-def test_min_length_filters_short_messages():
-    rules = {**RULES, "min_length": 40}
-    assert match_keywords("Over 2.5", rules) == ()
-
-
-def test_case_sensitive_rules_are_respected():
-    rules = {**RULES, "case_sensitive": True}
-    assert match_keywords("Over 2.5 goals", rules) == ()
-    assert match_keywords("over 2.5 goals", rules) == ("over 2.5",)
-
-
-def test_source_without_keywords_never_matches():
-    assert match_keywords("Over 2.5 goals", {"keywords": []}) == ()
-
-
-def test_capture_stores_the_signal_with_matched_terms(account, source):
+def test_capture_stores_the_signal(account, source):
     signal = capture(
         account,
         source,
@@ -71,7 +36,6 @@ def test_capture_stores_the_signal_with_matched_terms(account, source):
         author="Tips",
     )
     assert signal is not None
-    assert signal.matched_terms == ["over 2.5"]
     assert signal.text == "Over 2.5 goals here"
     assert signal.source_id == source.pk
     assert Signal.objects.count() == 1
@@ -89,9 +53,9 @@ def test_capture_is_idempotent(account, source):
     assert Signal.objects.count() == 1
 
 
-def test_capture_skips_messages_without_keywords(account, source):
+def test_capture_skips_blank_messages(account, source):
     assert (
-        capture(account, source, chat_id=source.entity.peer_id, message_id=1, text="hello there")
+        capture(account, source, chat_id=source.entity.peer_id, message_id=1, text="   ")
         is None
     )
     assert Signal.objects.count() == 0
@@ -108,7 +72,6 @@ def test_signal_list_is_available_to_every_authenticated_user(
     assert payload["count"] == 1
     row = payload["results"][0]
     assert row["text"] == "Over 2.5 goals"
-    assert row["matched_terms"] == ["over 2.5"]
     assert row["source_name"] == "Signals Group"
 
 
@@ -156,7 +119,6 @@ def test_signal_sources_require_super_admin(entity, regular_user, client, telegr
         {
             "account": str(entity.account_id),
             "entity": str(entity.pk),
-            "rules": RULES,
         },
         format="json",
     )
@@ -171,25 +133,14 @@ def test_super_admin_creates_a_signal_source(entity, user, client, telegram_env)
             "account": str(entity.account_id),
             "entity": str(entity.pk),
             "name": "Signals Group",
-            "rules": RULES,
         },
         format="json",
     )
     assert response.status_code == 201
     data = response.data["data"]
     assert data["chat_title"] == "Signals Group"
-    assert data["rules"]["keywords"] == RULES["keywords"]
+    assert data["name"] == "Signals Group"
     assert data["account_label"] == "Ada"
-
-
-def test_signal_source_requires_at_least_one_keyword(entity, user, client, telegram_env):
-    client.force_authenticate(user)
-    response = client.post(
-        "/api/v1/signal-sources/",
-        {"account": str(entity.account_id), "entity": str(entity.pk), "rules": {"keywords": []}},
-        format="json",
-    )
-    assert response.status_code == 400
 
 
 def test_signal_source_rejects_chat_from_another_account(account, user, client, telegram_env):
@@ -206,7 +157,6 @@ def test_signal_source_rejects_chat_from_another_account(account, user, client, 
         {
             "account": str(account.pk),
             "entity": str(other_entity.pk),
-            "rules": RULES,
         },
         format="json",
     )
@@ -217,11 +167,11 @@ def test_super_admin_updates_and_deletes_a_source(source, user, client, telegram
     client.force_authenticate(user)
     response = client.patch(
         f"/api/v1/signal-sources/{source.pk}/",
-        {"rules": {"keywords": ["over 3.5"]}, "enabled": False},
+        {"name": "Updated Group", "enabled": False},
         format="json",
     )
     assert response.status_code == 200
-    assert response.data["data"]["rules"]["keywords"] == ["over 3.5"]
+    assert response.data["data"]["name"] == "Updated Group"
     assert response.data["data"]["enabled"] is False
     response = client.delete(f"/api/v1/signal-sources/{source.pk}/")
     assert response.status_code == 200
@@ -242,7 +192,7 @@ def test_scrape_request_is_queued_for_the_worker(source, user, client, monkeypat
 
 
 @pytest.mark.django_db(transaction=True)
-def test_worker_captures_matching_messages(account, source, telegram_env):
+def test_worker_captures_messages(account, source, telegram_env):
     import asyncio
 
     from relay.services.worker import TelegramRelayWorker

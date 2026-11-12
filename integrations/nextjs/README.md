@@ -23,8 +23,29 @@ No extra npm dependencies — the files use only `fetch` and React.
 - `useTelegramConnect` — phone → code → optional 2FA password state machine.
 - `useTelegramAccounts` — list/refresh/reconnect/disconnect accounts.
 - Full TypeScript types for accounts, health, events, pagination, and the connection flow.
+- Workspace (tenant) type plus `getTenant`, `renameTenant`, `listMembers`, `createMember`, `updateMember`, `removeMember`, `listInvites`, `createInvite`, `revokeInvite`, `previewInvite`.
 
 Access tokens auto-refresh once on `401` using the stored refresh token; if refresh fails, `onUnauthorized` fires and tokens are cleared.
+
+## Workspaces
+
+Each user belongs to exactly one workspace. `register` creates a workspace and
+makes the caller its `owner` (the workspace "super admin"); pass `inviteCode`
+instead of `tenantName` to join an existing one.
+
+```ts
+await telegramApi.register(email, password, { tenantName: "Acme" }); // new workspace
+await telegramApi.register(email, password, { inviteCode: code });   // join one
+
+const me = await telegramApi.me();
+const isAdmin = me.role === "owner" || me.role === "admin";
+
+const invite = await telegramApi.createInvite({ role: "member", expiresInDays: 7 });
+// share invite.code; invitees preview it with telegramApi.previewInvite(code)
+```
+
+Gate admin screens on `role`, not `is_superuser` (which is platform-level). See
+`docs/multi-tenancy.md` for the endpoint table and role rules.
 
 ## Example component
 

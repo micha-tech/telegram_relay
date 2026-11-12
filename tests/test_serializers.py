@@ -2,13 +2,15 @@ import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory
 
-from relay.models import TelegramAccount, TelegramEntity
+from relay.models import Membership, TelegramAccount, TelegramEntity, Tenant
 from relay.serializers import RelaySerializer
 
 
 @pytest.mark.django_db
 def test_relay_rejects_unrecognized_rule_keys():
     user = get_user_model().objects.create_user("u@example.com", password="password")
+    tenant = Tenant.objects.create(name="Test", slug="test")
+    Membership.objects.create(user=user, tenant=tenant, role=Membership.Role.OWNER)
     account = TelegramAccount.objects.create(user=user, phone_number="+15551234567")
     source = TelegramEntity.objects.create(
         user=user, account=account, kind="source", peer_id=-1001, entity_type="channel"

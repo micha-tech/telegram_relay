@@ -51,13 +51,35 @@ def test_account_endpoints_require_super_admin(
     assert response.status_code == 403
 
 
-def test_super_admin_sees_accounts_from_every_owner(user, other_user, client, telegram_env):
+def test_tenant_admin_sees_only_their_workspace_accounts(
+    account, other_user, client, telegram_env
+):
+    from relay.models import TelegramAccount
+
     TelegramAccount.objects.create(
         user=other_user,
+        tenant=other_user.membership.tenant,
         phone_number="+15559998888",
         status=TelegramAccount.Status.CONNECTED,
     )
-    client.force_authenticate(user)
+    client.force_authenticate(account.user)
+    response = client.get("/api/v1/telegram/accounts/")
+    assert response.status_code == 200
+    assert response.data["data"]["count"] == 1
+    assert response.data["data"]["results"][0]["id"] == str(account.pk)
+
+
+def test_platform_admin_without_workspace_sees_every_tenant(account, client, telegram_env):
+    from django.contrib.auth import get_user_model
+
+    platform = get_user_model().objects.create_user(
+        username="platform@example.com",
+        email="platform@example.com",
+        password="password-12345",
+        is_superuser=True,
+        is_staff=True,
+    )
+    client.force_authenticate(platform)
     response = client.get("/api/v1/telegram/accounts/")
     assert response.status_code == 200
     assert response.data["data"]["count"] == 1

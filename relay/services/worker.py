@@ -289,7 +289,7 @@ class TelegramRelayWorker:
         await self._capture_signals(account, chat_id, event)
 
     async def _capture_signals(self, account, chat_id, event):
-        """Store keyword-matched messages from watched chats as signals."""
+        """Store messages from watched chats as signals."""
         sources = [
             source
             async for source in SignalSource.objects.filter(

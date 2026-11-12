@@ -88,6 +88,52 @@ export interface Dialog {
 export interface AuthUser {
   id: number | string;
   email: string;
+  is_superuser: boolean;
+  role: TenantRole | null;
+  tenant: TenantSummary | null;
+}
+
+export type TenantRole = "owner" | "admin" | "member";
+
+export interface TenantSummary {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface Tenant extends TenantSummary {
+  is_active: boolean;
+  role: TenantRole | null;
+  member_count: number;
+  created_at: string;
+}
+
+export interface Member {
+  id: number | string;
+  email: string;
+  role: TenantRole;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface Invite {
+  id: string;
+  code: string;
+  role: TenantRole;
+  email: string;
+  created_by_email: string;
+  expires_at: string;
+  used_at: string | null;
+  is_usable: boolean;
+  created_at: string;
+}
+
+export interface InvitePreview {
+  tenant_name: string;
+  tenant_slug: string;
+  role: TenantRole;
+  email: string;
+  expires_at: string;
 }
 
 export interface AuthTokens {
@@ -285,8 +331,20 @@ export function createTelegramApi(options: TelegramApiOptions = {}) {
     tokens,
 
     // ---- application auth -------------------------------------------------
-    async register(email: string, password: string): Promise<LoginResult> {
-      const data = await request<LoginResult>("/auth/register", json({ email, password }));
+    async register(
+      email: string,
+      password: string,
+      options: { tenantName?: string; inviteCode?: string } = {},
+    ): Promise<LoginResult> {
+      const data = await request<LoginResult>(
+        "/auth/register",
+        json({
+          email,
+          password,
+          tenant_name: options.tenantName ?? "",
+          invite_code: options.inviteCode ?? "",
+        }),
+      );
       tokens.setTokens({ access: data.access, refresh: data.refresh });
       return data;
     },
@@ -348,6 +406,59 @@ export function createTelegramApi(options: TelegramApiOptions = {}) {
     },
     listDialogs(id: string): Promise<Dialog[]> {
       return request<Dialog[]>(`/telegram/accounts/${id}/dialogs/`);
+    },
+
+    // ---- workspace -------------------------------------------------------
+    getTenant(): Promise<Tenant> {
+      return request<Tenant>("/tenant/current/");
+    },
+    renameTenant(name: string): Promise<Tenant> {
+      return request<Tenant>("/tenant/rename/", {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+      });
+    },
+    listMembers(): Promise<Member[]> {
+      return request<Member[]>("/tenant/members/");
+    },
+    createMember(input: {
+      email: string;
+      password: string;
+      role?: Exclude<TenantRole, "owner">;
+    }): Promise<Member> {
+      return request<Member>("/tenant/members/", json(input));
+    },
+    updateMember(id: number | string, role: TenantRole): Promise<Member> {
+      return request<Member>(`/tenant/members/${id}/`, {
+        method: "PATCH",
+        body: JSON.stringify({ role }),
+      });
+    },
+    removeMember(id: number | string): Promise<unknown> {
+      return request<unknown>(`/tenant/members/${id}/`, { method: "DELETE" });
+    },
+    listInvites(): Promise<Invite[]> {
+      return request<Invite[]>("/tenant/invites/");
+    },
+    createInvite(input: {
+      role?: Exclude<TenantRole, "owner">;
+      email?: string;
+      expiresInDays?: number;
+    } = {}): Promise<Invite> {
+      return request<Invite>(
+        "/tenant/invites/",
+        json({
+          role: input.role ?? "member",
+          email: input.email ?? "",
+          expires_in_days: input.expiresInDays ?? 7,
+        }),
+      );
+    },
+    revokeInvite(id: string): Promise<unknown> {
+      return request<unknown>(`/tenant/invites/${id}/`, { method: "DELETE" });
+    },
+    previewInvite(code: string): Promise<InvitePreview> {
+      return request<InvitePreview>(`/auth/invites/${encodeURIComponent(code)}`);
     },
   };
 }

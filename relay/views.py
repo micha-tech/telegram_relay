@@ -17,20 +17,28 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from relay.models import (
     AccountConnectionEvent,
     AuditLog,
+    Invite,
+    Membership,
     ProcessedMessage,
     RelayConfiguration,
     Signal,
     SignalSource,
     TelegramAccount,
     TelegramEntity,
+    Tenant,
 )
 from relay.pagination import SignalsPagination
-from relay.permissions import IsSuperAdmin
+from relay.permissions import IsTenantAdmin, IsTenantOwner
 from relay.responses import ok
 from relay.serializers import (
     AuditLogSerializer,
+    InviteCreateSerializer,
+    InviteSerializer,
     LoginSerializer,
     LogoutSerializer,
+    MemberCreateSerializer,
+    MemberSerializer,
+    MemberUpdateSerializer,
     ProcessedMessageSerializer,
     RegisterSerializer,
     RelaySerializer,
@@ -41,12 +49,20 @@ from relay.serializers import (
     TelegramAuthStartSerializer,
     TelegramAuthVerifySerializer,
     TelegramEntitySerializer,
+    TenantSerializer,
 )
 from relay.services.account_lifecycle import AccountLifecycleError, AccountLifecycleService
 from relay.services.redis import RedisService
 from relay.services.scrape_queue import enqueue_scrape
 from relay.services.telegram_auth import TelegramAuthError, TelegramAuthService
 from relay.services.telegram_entities import TelegramEntityService
+from relay.tenancy import (
+    apply_scope,
+    ensure_membership,
+    is_tenant_owner,
+    issue_invite,
+    membership_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +93,24 @@ def tokens(user):
     }
 
 
+def tenant_payload(membership: Membership | None) -> dict | None:
+    if membership is None:
+        return None
+    return {
+        "id": str(membership.tenant_id),
+        "name": membership.tenant.name,
+        "slug": membership.tenant.slug,
+    }
+
+
 def user_payload(user):
+    membership = membership_for(user)
     return {
         "id": user.id,
         "email": user.email,
         "is_superuser": bool(user.is_superuser),
+        "role": membership.role if membership else None,
+        "tenant": tenant_payload(membership),
     }
 
 
@@ -143,13 +172,17 @@ class EnvelopeMixin:
 
 
 class AccountViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
-    """Operator-only view over every connected Telegram account."""
+    """Workspace administrative view over the tenant's Telegram accounts."""
 
     serializer_class = TelegramAccountSerializer
-    permission_classes = [IsSuperAdmin]
+    permission_classes = [IsTenantAdmin]
 
     def get_queryset(self):
-        return TelegramAccount.objects.select_related("user").order_by("created_at")
+        return apply_scope(
+            TelegramAccount.objects.select_related("user").order_by("created_at"),
+            self.request.user,
+            "tenant",
+        )
 
     @action(detail=True, methods=["post"])
     def disconnect(self, request, pk=None):
@@ -198,21 +231,27 @@ class AccountViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
 
 class EntityViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = TelegramEntitySerializer
-    permission_classes = [IsSuperAdmin]
+    permission_classes = [IsTenantAdmin]
 
     def get_queryset(self):
-        return TelegramEntity.objects.select_related("account", "user")
+        return apply_scope(
+            TelegramEntity.objects.select_related("account", "user"),
+            self.request.user,
+            "account__tenant",
+        )
 
 
 class SignalViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
-    """Scraped signals. Every authenticated user can read the feed."""
+    """Scraped signals. Members read the feed of their own workspace."""
 
     serializer_class = SignalSerializer
     pagination_class = SignalsPagination
 
     def get_queryset(self):
-        queryset = Signal.objects.select_related(
-            "account", "source", "source__entity"
+        queryset = apply_scope(
+            Signal.objects.select_related("account", "source", "source__entity"),
+            self.request.user,
+            "account__tenant",
         )
         params = self.request.query_params
         account = params.get("account")
@@ -271,7 +310,9 @@ class SignalViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
             {
                 "total": total,
                 "last_24h": last_24h,
-                "active_sources": SignalSource.objects.filter(enabled=True).count(),
+                "active_sources": apply_scope(
+                    SignalSource.objects.filter(enabled=True), request.user, "account__tenant"
+                ).count(),
                 "by_source": by_source,
                 "by_account": by_account,
             }
@@ -279,13 +320,17 @@ class SignalViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
 
 
 class SignalSourceViewSet(EnvelopeMixin, viewsets.ModelViewSet):
-    """Watched chats and their keyword rules. Super administrators only."""
+    """Watched chats whose messages become signals. Workspace administrators only."""
 
     serializer_class = SignalSourceSerializer
-    permission_classes = [IsSuperAdmin]
+    permission_classes = [IsTenantAdmin]
 
     def get_queryset(self):
-        return SignalSource.objects.select_related("account", "entity").order_by("created_at")
+        return apply_scope(
+            SignalSource.objects.select_related("account", "entity").order_by("created_at"),
+            self.request.user,
+            "account__tenant",
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -346,8 +391,10 @@ class RelayViewSet(EnvelopeMixin, viewsets.ModelViewSet):
     serializer_class = RelaySerializer
 
     def get_queryset(self):
-        return RelayConfiguration.objects.filter(user=self.request.user).select_related(
-            "source", "destination"
+        return apply_scope(
+            RelayConfiguration.objects.select_related("source", "destination"),
+            self.request.user,
+            "account__tenant",
         )
 
     def perform_create(self, serializer):
@@ -407,8 +454,10 @@ class MessageViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = ProcessedMessageSerializer
 
     def get_queryset(self):
-        return ProcessedMessage.objects.filter(relay__user=self.request.user).order_by(
-            "-created_at"
+        return apply_scope(
+            ProcessedMessage.objects.order_by("-created_at"),
+            self.request.user,
+            "relay__account__tenant",
         )
 
 
@@ -419,16 +468,210 @@ class AuditLogViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
         return AuditLog.objects.filter(user=self.request.user).order_by("-created_at")
 
 
+class TenantViewSet(viewsets.GenericViewSet):
+    """The caller's workspace: read it, or rename it as the owner."""
+
+    serializer_class = TenantSerializer
+
+    def get_permissions(self):
+        if self.action in ("update", "partial_update", "rename"):
+            return [IsTenantOwner()]
+        return [IsTenantAdmin()]
+
+    def get_queryset(self):
+        return apply_scope(Tenant.objects.all(), self.request.user, "id")
+
+    def _current(self):
+        membership = membership_for(self.request.user)
+        if membership is None:
+            raise serializers.ValidationError("You are not a member of a workspace")
+        return membership.tenant
+
+    @action(detail=False, methods=["get"])
+    def current(self, request):
+        tenant = self._current()
+        return ok(self.get_serializer(tenant, context={"request": request}).data)
+
+    @action(detail=False, methods=["patch"])
+    def rename(self, request):
+        tenant = self._current()
+        serializer = self.get_serializer(tenant, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        AuditLog.objects.create(
+            user=request.user,
+            action="tenant.renamed",
+            object_type="tenant",
+            object_id=tenant.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+        return ok(serializer.data)
+
+
+class MemberViewSet(EnvelopeMixin, viewsets.GenericViewSet):
+    """Users inside the caller's workspace. Manageable by workspace admins."""
+
+    serializer_class = MemberSerializer
+    permission_classes = [IsTenantAdmin]
+    lookup_field = "user_id"
+
+    def get_queryset(self):
+        return apply_scope(
+            Membership.objects.select_related("user", "tenant").order_by("created_at"),
+            self.request.user,
+            "tenant",
+        )
+
+    def list(self, request, *args, **kwargs):
+        return ok(self.get_serializer(self.get_queryset(), many=True).data)
+
+    def create(self, request, *args, **kwargs):
+        membership = ensure_membership(request.user)
+        serializer = MemberCreateSerializer(
+            data=request.data, context={"tenant": membership.tenant}
+        )
+        serializer.is_valid(raise_exception=True)
+        if (
+            serializer.validated_data["role"] == Membership.Role.ADMIN
+            and not is_tenant_owner(request.user)
+        ):
+            raise serializers.ValidationError(
+                {"role": "Only the workspace owner can add administrators"}
+            )
+        member = serializer.save()
+        AuditLog.objects.create(
+            user=request.user,
+            action="member.created",
+            object_type="membership",
+            object_id=member.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+        return ok(self.get_serializer(member).data, status=201)
+
+    def update(self, request, *args, **kwargs):
+        member = self.get_object()
+        serializer = MemberUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        role = serializer.validated_data["role"]
+        if member.user_id == request.user.id:
+            raise serializers.ValidationError("You cannot change your own role")
+        if not is_tenant_owner(request.user):
+            raise serializers.ValidationError("Only the workspace owner can change roles")
+        if member.role == Membership.Role.OWNER and role != Membership.Role.OWNER:
+            self._ensure_another_owner(member)
+        member.role = role
+        member.save(update_fields=["role", "updated_at"])
+        return ok(self.get_serializer(member).data)
+
+    def partial_update(self, request, *args, **kwargs):
+        return self.update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        member = self.get_object()
+        if member.user_id == request.user.id:
+            raise serializers.ValidationError("You cannot remove yourself")
+        if not is_tenant_owner(request.user) and member.role != Membership.Role.MEMBER:
+            raise serializers.ValidationError("Only the workspace owner can remove administrators")
+        if member.role == Membership.Role.OWNER:
+            self._ensure_another_owner(member)
+        user = member.user
+        member.delete()
+        # Keep the user row (and anything it connected) but revoke access.
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+        AuditLog.objects.create(
+            user=request.user,
+            action="member.removed",
+            object_type="membership",
+            object_id=member.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+        return ok(message="Member removed")
+
+    @staticmethod
+    def _ensure_another_owner(member):
+        others = Membership.objects.filter(
+            tenant_id=member.tenant_id, role=Membership.Role.OWNER
+        ).exclude(pk=member.pk)
+        if not others.exists():
+            raise serializers.ValidationError("A workspace must keep at least one owner")
+
+
+class InviteViewSet(EnvelopeMixin, viewsets.GenericViewSet):
+    """Single-use invite codes for joining the workspace."""
+
+    serializer_class = InviteSerializer
+    permission_classes = [IsTenantAdmin]
+
+    def get_queryset(self):
+        return apply_scope(
+            Invite.objects.select_related("created_by").order_by("-created_at"),
+            self.request.user,
+            "tenant",
+        )
+
+    def list(self, request, *args, **kwargs):
+        return ok(self.get_serializer(self.get_queryset(), many=True).data)
+
+    def create(self, request, *args, **kwargs):
+        membership = ensure_membership(request.user)
+        serializer = InviteCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        if data["role"] == Membership.Role.ADMIN and not is_tenant_owner(request.user):
+            raise serializers.ValidationError(
+                {"role": "Only the workspace owner can invite administrators"}
+            )
+        invite = issue_invite(
+            membership.tenant,
+            request.user,
+            role=data["role"],
+            email=data["email"],
+            days=data["expires_in_days"],
+        )
+        AuditLog.objects.create(
+            user=request.user,
+            action="invite.created",
+            object_type="invite",
+            object_id=invite.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+        return ok(self.get_serializer(invite).data, status=201)
+
+    def destroy(self, request, *args, **kwargs):
+        invite = self.get_object()
+        invite.delete()
+        return ok(message="Invite revoked")
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def invite_preview(request, code):
+    invite = Invite.objects.select_related("tenant").filter(code=code).first()
+    if invite is None or not invite.is_usable:
+        raise serializers.ValidationError("This invite is not valid")
+    return ok(
+        {
+            "tenant_name": invite.tenant.name,
+            "tenant_slug": invite.tenant.slug,
+            "role": invite.role,
+            "email": invite.email,
+            "expires_at": invite.expires_at,
+        }
+    )
+
+
 class TelegramAuthThrottle(ScopedRateThrottle):
     scope = "telegram_auth"
 
 
 @api_view(["POST"])
 @throttle_classes([TelegramAuthThrottle])
-@permission_classes([IsSuperAdmin])
+@permission_classes([IsTenantAdmin])
 def telegram_auth_start(request):
     serializer = TelegramAuthStartSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
+    ensure_membership(request.user)
     try:
         challenge = TelegramAuthService().start(
             request.user,
@@ -449,7 +692,7 @@ def telegram_auth_start(request):
 
 @api_view(["POST"])
 @throttle_classes([TelegramAuthThrottle])
-@permission_classes([IsSuperAdmin])
+@permission_classes([IsTenantAdmin])
 def telegram_auth_verify(request):
     serializer = TelegramAuthVerifySerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -467,7 +710,7 @@ def telegram_auth_verify(request):
 
 @api_view(["POST"])
 @throttle_classes([TelegramAuthThrottle])
-@permission_classes([IsSuperAdmin])
+@permission_classes([IsTenantAdmin])
 def telegram_auth_2fa(request):
     serializer = TelegramAuth2FASerializer(data=request.data)
     serializer.is_valid(raise_exception=True)

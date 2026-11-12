@@ -1,16 +1,22 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 
 from relay.models import (
     AuditLog,
+    Invite,
+    Membership,
     ProcessedMessage,
     RelayConfiguration,
     Signal,
     SignalSource,
     TelegramAccount,
     TelegramEntity,
+    Tenant,
 )
+from relay.tenancy import can_access_tenant, create_tenant, is_tenant_admin, membership_for
 
 User = get_user_model()
 
@@ -33,17 +39,58 @@ def account_label(account: TelegramAccount) -> str:
 
 
 class RegisterSerializer(serializers.Serializer):
+    """Create a workspace (default) or join an existing one with an invite code."""
+
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
+    tenant_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    invite_code = serializers.CharField(max_length=64, required=False, allow_blank=True)
 
     def validate_password(self, value):
         validate_password(value)
         return value
 
+    def validate_invite_code(self, value):
+        value = (value or "").strip()
+        if not value:
+            return ""
+        invite = Invite.objects.select_related("tenant").filter(code=value).first()
+        if invite is None:
+            raise serializers.ValidationError("Invalid invite code")
+        if invite.used_at is not None:
+            raise serializers.ValidationError("This invite has already been used")
+        if invite.expires_at <= timezone.now():
+            raise serializers.ValidationError("This invite has expired")
+        email = (self.initial_data.get("email") or "").strip().lower()
+        if invite.email and invite.email != email:
+            raise serializers.ValidationError(
+                "This invite was issued for a different email address"
+            )
+        self._invite = invite
+        return value
+
+    @transaction.atomic
     def create(self, data):
-        return User.objects.create_user(
-            username=data["email"].lower(), email=data["email"].lower(), password=data["password"]
+        email = data["email"].strip().lower()
+        if User.objects.filter(username=email).exists():
+            raise serializers.ValidationError({"email": "An account already exists"})
+        invite = getattr(self, "_invite", None)
+        user = User.objects.create_user(
+            username=email, email=email, password=data["password"]
         )
+        if invite is not None:
+            invite = Invite.objects.select_for_update().get(pk=invite.pk)
+            if invite.used_at is not None:
+                raise serializers.ValidationError(
+                    {"invite_code": "This invite has already been used"}
+                )
+            Membership.objects.create(user=user, tenant=invite.tenant, role=invite.role)
+            invite.used_at = timezone.now()
+            invite.used_by = user
+            invite.save(update_fields=["used_at", "used_by", "updated_at"])
+        else:
+            create_tenant(data.get("tenant_name") or "", user)
+        return user
 
 
 class LoginSerializer(serializers.Serializer):
@@ -110,32 +157,6 @@ class RelayRulesSerializer(serializers.Serializer):
         return result
 
 
-class SignalRulesSerializer(serializers.Serializer):
-    keywords = serializers.ListField(
-        child=serializers.CharField(max_length=200),
-        max_length=100,
-        allow_empty=False,
-        error_messages={"empty": "Add at least one keyword to watch for."},
-    )
-    blocked_phrases = serializers.ListField(
-        child=serializers.CharField(max_length=500), required=False, max_length=100
-    )
-    min_length = serializers.IntegerField(required=False, min_value=0, max_value=4000)
-    case_sensitive = serializers.BooleanField(required=False)
-
-    def validate(self, attrs):
-        unknown = set(self.initial_data) - set(self.fields)
-        if unknown:
-            raise serializers.ValidationError(f"Unknown rule keys: {', '.join(sorted(unknown))}")
-        return attrs
-
-    def validate_keywords(self, value):
-        cleaned = [item.strip() for item in value if item.strip()]
-        if not cleaned:
-            raise serializers.ValidationError("Add at least one keyword to watch for.")
-        return cleaned
-
-
 class TelegramAccountSerializer(serializers.ModelSerializer):
     phone_masked = serializers.SerializerMethodField()
 
@@ -175,7 +196,8 @@ class TelegramEntitySerializer(serializers.ModelSerializer):
         read_only_fields = ["user", "entity_type", "username", "title", "created_at"]
 
     def validate_account(self, account):
-        if account.user_id != self.context["request"].user.id:
+        user = self.context["request"].user
+        if account.user_id != user.id and not can_access_tenant(user, account.tenant_id):
             raise serializers.ValidationError("Invalid account")
         return account
 
@@ -203,7 +225,11 @@ class RelaySerializer(serializers.ModelSerializer):
         account = attrs.get("account", getattr(self.instance, "account", None))
         source = attrs.get("source", getattr(self.instance, "source", None))
         destination = attrs.get("destination", getattr(self.instance, "destination", None))
-        if not account or account.user_id != user.id:
+        usable = account and (
+            account.user_id == user.id
+            or (is_tenant_admin(user) and can_access_tenant(user, account.tenant_id))
+        )
+        if not usable:
             raise serializers.ValidationError("Invalid account")
         if source.account_id != account.id or source.kind != "source":
             raise serializers.ValidationError("Invalid source")
@@ -218,7 +244,6 @@ class RelaySerializer(serializers.ModelSerializer):
 
 
 class SignalSourceSerializer(serializers.ModelSerializer):
-    rules = serializers.JSONField()
     forward_to = serializers.PrimaryKeyRelatedField(
         queryset=TelegramEntity.objects.all(), allow_null=True, required=False
     )
@@ -241,8 +266,6 @@ class SignalSourceSerializer(serializers.ModelSerializer):
             "name",
             "enabled",
             "forward_enabled",
-            "capture_all",
-            "rules",
             "backfill_limit",
             "last_scraped_at",
             "last_signal_at",
@@ -267,7 +290,10 @@ class SignalSourceSerializer(serializers.ModelSerializer):
         account = attrs.get("account", getattr(self.instance, "account", None))
         entity = attrs.get("entity", getattr(self.instance, "entity", None))
         forward_to = attrs.get("forward_to", getattr(self.instance, "forward_to", None))
+        user = self.context["request"].user
         if not account:
+            raise serializers.ValidationError("Invalid account")
+        if not can_access_tenant(user, account.tenant_id):
             raise serializers.ValidationError("Invalid account")
         if not entity or entity.account_id != account.id or entity.kind != "source":
             raise serializers.ValidationError("Invalid chat")
@@ -280,17 +306,6 @@ class SignalSourceSerializer(serializers.ModelSerializer):
                 {"forward_to": "Forward target must be a different chat."}
             )
         return attrs
-
-    def validate_rules(self, value):
-        if self.initial_data.get("capture_all") is True or (
-            isinstance(self.instance, SignalSource) and self.instance.capture_all
-        ):
-            if not isinstance(value, dict):
-                raise serializers.ValidationError("Invalid rules")
-            return value
-        serializer = SignalRulesSerializer(data=value)
-        serializer.is_valid(raise_exception=True)
-        return serializer.validated_data
 
 
 class SignalSerializer(serializers.ModelSerializer):
@@ -310,7 +325,6 @@ class SignalSerializer(serializers.ModelSerializer):
             "text",
             "author",
             "author_id",
-            "matched_terms",
             "sent_at",
             "created_at",
         ]
@@ -328,6 +342,115 @@ class ProcessedMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProcessedMessage
         exclude = []
+
+
+class TenantSerializer(serializers.ModelSerializer):
+    role = serializers.SerializerMethodField()
+    member_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Tenant
+        fields = ["id", "name", "slug", "is_active", "role", "member_count", "created_at"]
+        read_only_fields = ["id", "slug", "is_active", "role", "member_count", "created_at"]
+
+    def get_role(self, obj) -> str | None:
+        request = self.context.get("request")
+        membership = membership_for(request.user) if request else None
+        return membership.role if membership else None
+
+    def get_member_count(self, obj) -> int:
+        return obj.memberships.count()
+
+
+class MemberSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(source="user_id", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+    is_active = serializers.BooleanField(source="user.is_active", read_only=True)
+
+    class Meta:
+        model = Membership
+        fields = ["id", "email", "role", "is_active", "created_at"]
+        read_only_fields = fields
+
+
+class MemberCreateSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+    role = serializers.ChoiceField(
+        choices=[Membership.Role.ADMIN, Membership.Role.MEMBER],
+        default=Membership.Role.MEMBER,
+    )
+
+    def validate_password(self, value):
+        validate_password(value)
+        return value
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        existing = User.objects.filter(username=email).first()
+        if existing is not None:
+            reactivatable = not existing.is_active and not Membership.objects.filter(
+                user=existing
+            ).exists()
+            if not reactivatable:
+                raise serializers.ValidationError("An account already exists for this email")
+            self._existing = existing
+        return email
+
+    @transaction.atomic
+    def create(self, data):
+        tenant = self.context["tenant"]
+        user = getattr(self, "_existing", None)
+        if user is not None:
+            user.is_active = True
+            user.set_password(data["password"])
+            user.save(update_fields=["is_active", "password"])
+        else:
+            user = User.objects.create_user(
+                username=data["email"], email=data["email"], password=data["password"]
+            )
+        return Membership.objects.create(user=user, tenant=tenant, role=data["role"])
+
+
+class MemberUpdateSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=Membership.Role.choices)
+
+
+class InviteSerializer(serializers.ModelSerializer):
+    created_by_email = serializers.EmailField(source="created_by.email", read_only=True, default="")
+    is_usable = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Invite
+        fields = [
+            "id",
+            "code",
+            "role",
+            "email",
+            "created_by_email",
+            "expires_at",
+            "used_at",
+            "is_usable",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class InviteCreateSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(
+        choices=[Membership.Role.ADMIN, Membership.Role.MEMBER],
+        default=Membership.Role.MEMBER,
+    )
+    email = serializers.EmailField(required=False, allow_blank=True, default="")
+    expires_in_days = serializers.IntegerField(min_value=1, max_value=30, default=7)
+
+
+class InvitePreviewSerializer(serializers.Serializer):
+    tenant_name = serializers.CharField()
+    tenant_slug = serializers.CharField()
+    role = serializers.CharField()
+    email = serializers.CharField(allow_blank=True)
+    expires_at = serializers.DateTimeField()
 
 
 class AuditLogSerializer(serializers.ModelSerializer):
