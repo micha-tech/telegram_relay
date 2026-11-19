@@ -12,9 +12,16 @@ from relay.models import (
     RelayConfiguration,
     Signal,
     SignalSource,
+    SignalTemplate,
     TelegramAccount,
     TelegramEntity,
     Tenant,
+)
+from relay.services.signal_formatting import (
+    TemplateConfigError,
+    compile_body,
+    validate_patterns,
+    validate_replacements,
 )
 from relay.tenancy import can_access_tenant, create_tenant, is_tenant_admin, membership_for
 
@@ -246,10 +253,87 @@ class RelaySerializer(serializers.ModelSerializer):
         return serializer.validated_data
 
 
+class SignalTemplateConfigMixin(serializers.Serializer):
+    """Shared validation for saved templates and unsaved previews."""
+
+    body = serializers.CharField(required=False, allow_blank=True, default="")
+    header = serializers.CharField(required=False, allow_blank=True, default="")
+    footer = serializers.CharField(required=False, allow_blank=True, default="")
+    strip_header_lines = serializers.IntegerField(
+        required=False, min_value=0, max_value=50, default=0
+    )
+    remove_urls = serializers.BooleanField(required=False, default=False)
+    remove_patterns = serializers.ListField(
+        child=serializers.CharField(allow_blank=False, max_length=500),
+        required=False,
+        max_length=20,
+        default=list,
+    )
+    replacements = serializers.ListField(
+        child=serializers.DictField(child=serializers.CharField()),
+        required=False,
+        max_length=50,
+        default=list,
+    )
+    drop_empty = serializers.BooleanField(required=False, default=True)
+
+    def validate_body(self, value):
+        try:
+            compile_body(value)
+        except TemplateConfigError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+        return value
+
+    def validate_remove_patterns(self, value):
+        try:
+            return validate_patterns(value)
+        except TemplateConfigError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate_replacements(self, value):
+        try:
+            return validate_replacements(value)
+        except TemplateConfigError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+
+class SignalTemplateSerializer(SignalTemplateConfigMixin, serializers.ModelSerializer):
+    class Meta:
+        model = SignalTemplate
+        fields = [
+            "id",
+            "tenant",
+            "name",
+            "body",
+            "header",
+            "footer",
+            "strip_header_lines",
+            "remove_urls",
+            "remove_patterns",
+            "replacements",
+            "drop_empty",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+
+
+class SignalTemplatePreviewSerializer(SignalTemplateConfigMixin, serializers.Serializer):
+    text = serializers.CharField(required=False, allow_blank=True, default="")
+    source = serializers.CharField(required=False, allow_blank=True, default="")
+    account = serializers.CharField(required=False, allow_blank=True, default="")
+    author = serializers.CharField(required=False, allow_blank=True, default="")
+    sent_at = serializers.CharField(required=False, allow_blank=True, default="")
+
+
 class SignalSourceSerializer(serializers.ModelSerializer):
     forward_to = serializers.PrimaryKeyRelatedField(
         queryset=TelegramEntity.objects.all(), allow_null=True, required=False
     )
+    template = serializers.PrimaryKeyRelatedField(
+        queryset=SignalTemplate.objects.all(), allow_null=True, required=False
+    )
+    template_name = serializers.SerializerMethodField()
     chat_title = serializers.SerializerMethodField()
     chat_username = serializers.SerializerMethodField()
     peer_id = serializers.SerializerMethodField()
@@ -263,6 +347,8 @@ class SignalSourceSerializer(serializers.ModelSerializer):
             "account_label",
             "entity",
             "forward_to",
+            "template",
+            "template_name",
             "chat_title",
             "chat_username",
             "peer_id",
@@ -276,6 +362,9 @@ class SignalSourceSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["last_scraped_at", "last_signal_at", "created_at", "updated_at"]
+
+    def get_template_name(self, obj) -> str | None:
+        return obj.template.name if obj.template_id else None
 
     def get_chat_title(self, obj) -> str:
         return obj.entity.title or ""
@@ -293,6 +382,7 @@ class SignalSourceSerializer(serializers.ModelSerializer):
         account = attrs.get("account", getattr(self.instance, "account", None))
         entity = attrs.get("entity", getattr(self.instance, "entity", None))
         forward_to = attrs.get("forward_to", getattr(self.instance, "forward_to", None))
+        template = attrs.get("template", getattr(self.instance, "template", None))
         user = self.context["request"].user
         if not account:
             raise serializers.ValidationError("Invalid account")
@@ -311,6 +401,10 @@ class SignalSourceSerializer(serializers.ModelSerializer):
         if forward_to and entity and forward_to.peer_id == entity.peer_id:
             raise serializers.ValidationError(
                 {"forward_to": "Forward target must be a different chat."}
+            )
+        if template and str(template.tenant_id) != str(account.tenant_id):
+            raise serializers.ValidationError(
+                {"template": "Template must belong to the same workspace."}
             )
         return attrs
 

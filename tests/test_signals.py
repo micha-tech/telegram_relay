@@ -214,7 +214,7 @@ def test_worker_captures_messages(account, source, telegram_env):
     worker = TelegramRelayWorker.__new__(TelegramRelayWorker)
 
     async def scenario():
-        await worker._capture_signals(account, source.entity.peer_id, FakeEvent())
+        await worker._capture_signals(account, None, source.entity.peer_id, FakeEvent())
 
     asyncio.run(scenario())
     assert Signal.objects.count() == 1
@@ -239,7 +239,7 @@ def test_worker_ignores_messages_from_unwatched_chats(account, entity, telegram_
     worker = TelegramRelayWorker.__new__(TelegramRelayWorker)
 
     async def scenario():
-        await worker._capture_signals(account, entity.peer_id, FakeEvent())
+        await worker._capture_signals(account, None, entity.peer_id, FakeEvent())
 
     asyncio.run(scenario())
     assert Signal.objects.count() == 0

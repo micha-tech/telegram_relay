@@ -231,6 +231,31 @@ class ProcessedMessage(TimestampedModel):
         ]
 
 
+class SignalTemplate(TimestampedModel):
+    """Reusable formatting rules applied when a signal is forwarded."""
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE, related_name="signal_templates"
+    )
+    name = models.CharField(max_length=120)
+    body = models.TextField(blank=True)
+    header = models.TextField(blank=True)
+    footer = models.TextField(blank=True)
+    strip_header_lines = models.PositiveIntegerField(default=0)
+    remove_urls = models.BooleanField(default=False)
+    remove_patterns = models.JSONField(default=list)
+    replacements = models.JSONField(default=list)
+    drop_empty = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "name"], name="uniq_tenant_signal_template_name"
+            )
+        ]
+
+
 class SignalSource(TimestampedModel):
     """A watched Telegram chat whose messages are captured as signals."""
 
@@ -246,6 +271,13 @@ class SignalSource(TimestampedModel):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="signal_source_forwards",
+    )
+    template = models.ForeignKey(
+        SignalTemplate,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_sources",
     )
     name = models.CharField(max_length=255, blank=True)
     enabled = models.BooleanField(default=True, db_index=True)

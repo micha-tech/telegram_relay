@@ -24,6 +24,7 @@ from .crypto import SecretBox
 from .processing import MessageProcessor, TelegramMessage
 from .scrape_queue import scrape_queue_key
 from .session_store import TelegramSessionStore
+from .signal_formatting import format_signal
 from .signals import capture
 from .telegram_auth import record_event
 
@@ -286,15 +287,15 @@ class TelegramRelayWorker:
                 await TelegramAccount.objects.filter(pk=account.pk).aupdate(
                     last_activity_at=timezone.now()
                 )
-        await self._capture_signals(account, chat_id, event)
+        await self._capture_signals(account, client, chat_id, event)
 
-    async def _capture_signals(self, account, chat_id, event):
-        """Store messages from watched chats as signals."""
+    async def _capture_signals(self, account, client, chat_id, event):
+        """Store messages from watched chats as signals and forward formatted copies."""
         sources = [
             source
             async for source in SignalSource.objects.filter(
                 account=account, entity__peer_id=chat_id, enabled=True
-            ).select_related("entity")
+            ).select_related("entity", "template")
         ]
         if not sources:
             return
@@ -315,10 +316,22 @@ class TelegramRelayWorker:
                 sent_at=sent_at,
             )
             if signal is not None and source.forward_enabled and source.forward_to_id:
+                formatted = format_signal(
+                    source.template,
+                    text=signal.text,
+                    source=source.name or source.entity.title or "",
+                    account=account.display_name or "",
+                    author=author,
+                    sent_at=sent_at,
+                    message_id=event.id,
+                    peer_id=chat_id,
+                )
+                if formatted is None:
+                    continue
                 try:
                     from .signals import forward_signal
 
-                    await forward_signal(client, source, signal.text)  # noqa: F821
+                    await forward_signal(client, source, formatted)
                 except Exception:
                     logger.exception(
                         "signal_forward_failed",
@@ -343,7 +356,7 @@ class TelegramRelayWorker:
     async def _scrape_source(self, account, client, source_id):
         source = (
             await SignalSource.objects.filter(pk=source_id, account=account)
-            .select_related("entity")
+            .select_related("entity", "template")
             .afirst()
         )
         if source is None or not source.enabled:
@@ -365,10 +378,22 @@ class TelegramRelayWorker:
             if signal is not None:
                 captured += 1
                 if source.forward_enabled and source.forward_to_id:
+                    formatted = format_signal(
+                        source.template,
+                        text=signal.text,
+                        source=source.name or source.entity.title or "",
+                        account=account.display_name or "",
+                        author=getattr(message, "post_author", "") or "",
+                        sent_at=getattr(message, "date", None),
+                        message_id=message.id,
+                        peer_id=source.entity.peer_id,
+                    )
+                    if formatted is None:
+                        continue
                     try:
                         from .signals import forward_signal
 
-                        await forward_signal(client, source, signal.text)
+                        await forward_signal(client, source, formatted)
                     except Exception:
                         logger.exception(
                             "signal_forward_failed",

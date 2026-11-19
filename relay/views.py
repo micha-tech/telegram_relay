@@ -24,6 +24,7 @@ from relay.models import (
     RelayConfiguration,
     Signal,
     SignalSource,
+    SignalTemplate,
     TelegramAccount,
     TelegramEntity,
     Tenant,
@@ -45,6 +46,8 @@ from relay.serializers import (
     RelaySerializer,
     SignalSerializer,
     SignalSourceSerializer,
+    SignalTemplatePreviewSerializer,
+    SignalTemplateSerializer,
     TelegramAccountSerializer,
     TelegramAuth2FASerializer,
     TelegramAuthStartSerializer,
@@ -55,6 +58,7 @@ from relay.serializers import (
 from relay.services.account_lifecycle import AccountLifecycleError, AccountLifecycleService
 from relay.services.redis import RedisService
 from relay.services.scrape_queue import enqueue_scrape
+from relay.services.signal_formatting import format_signal
 from relay.services.telegram_auth import (
     TelegramAuthError,
     TelegramAuthService,
@@ -341,6 +345,74 @@ class SignalViewSet(EnvelopeMixin, viewsets.ReadOnlyModelViewSet):
         )
 
 
+class SignalTemplateViewSet(EnvelopeMixin, viewsets.ModelViewSet):
+    """Reusable formatting templates for forwarded signals. Admin only."""
+
+    serializer_class = SignalTemplateSerializer
+    permission_classes = [IsTenantAdmin]
+
+    def get_queryset(self):
+        return apply_scope(SignalTemplate.objects.all(), self.request.user, "tenant")
+
+    def _current_tenant(self):
+        membership = membership_for(self.request.user)
+        if membership is None:
+            raise serializers.ValidationError("You are not a member of a workspace")
+        if not membership.tenant.is_active:
+            raise PermissionDenied("This workspace is inactive")
+        return membership.tenant
+
+    @staticmethod
+    def _audit(request, action, template):
+        AuditLog.objects.create(
+            user=request.user,
+            action=action,
+            object_type="signal_template",
+            object_id=template.id,
+            request_id=getattr(request, "request_id", ""),
+        )
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        template = serializer.save(tenant=self._current_tenant())
+        self._audit(request, "signal_template.created", template)
+        return ok(self.get_serializer(template).data, status=201)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        template = serializer.save()
+        self._audit(request, "signal_template.updated", template)
+        return ok(self.get_serializer(template).data)
+
+    def destroy(self, request, *args, **kwargs):
+        template = self.get_object()
+        self.perform_destroy(template)
+        self._audit(request, "signal_template.deleted", template)
+        return ok(message="Signal template deleted")
+
+    @action(detail=False, methods=["post"])
+    def preview(self, request):
+        """Dry-run an unsaved template configuration against sample text."""
+        serializer = SignalTemplatePreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        formatted = format_signal(
+            data,
+            text=data["text"],
+            source=data["source"],
+            account=data["account"],
+            author=data["author"],
+            sent_at=data["sent_at"],
+            message_id=request.data.get("message_id"),
+            peer_id=request.data.get("peer_id"),
+        )
+        return ok({"formatted": formatted or "", "skipped": formatted is None})
+
+
 class SignalSourceViewSet(EnvelopeMixin, viewsets.ModelViewSet):
     """Watched chats whose messages become signals. Workspace administrators only."""
 
@@ -349,7 +421,9 @@ class SignalSourceViewSet(EnvelopeMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         return apply_scope(
-            SignalSource.objects.select_related("account", "entity").order_by("created_at"),
+            SignalSource.objects.select_related("account", "entity", "template").order_by(
+                "created_at"
+            ),
             self.request.user,
             "account__tenant",
         )
