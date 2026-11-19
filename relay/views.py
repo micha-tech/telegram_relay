@@ -9,8 +9,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
-from rest_framework.exceptions import PermissionDenied
-from rest_framework.permissions import AllowAny
+from rest_framework.exceptions import APIException, PermissionDenied
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -55,7 +55,11 @@ from relay.serializers import (
 from relay.services.account_lifecycle import AccountLifecycleError, AccountLifecycleService
 from relay.services.redis import RedisService
 from relay.services.scrape_queue import enqueue_scrape
-from relay.services.telegram_auth import TelegramAuthError, TelegramAuthService
+from relay.services.telegram_auth import (
+    TelegramAuthError,
+    TelegramAuthService,
+    TelegramFloodWaitError,
+)
 from relay.services.telegram_entities import TelegramEntityService
 from relay.tenancy import (
     apply_scope,
@@ -66,6 +70,23 @@ from relay.tenancy import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class FloodWaitResponse(APIException):
+    """Client error carrying the retry window reported by Telegram."""
+
+    status_code = 400
+    default_code = "flood_wait"
+
+    def __init__(self, seconds: int):
+        super().__init__(f"Too many requests, try again in {seconds} seconds")
+        self.retry_after_seconds = seconds
+
+
+def raise_telegram_auth_error(exc: TelegramAuthError):
+    if isinstance(exc, TelegramFloodWaitError):
+        raise FloodWaitResponse(exc.seconds) from exc
+    raise serializers.ValidationError(str(exc)) from exc
 
 
 @api_view(["GET"])
@@ -391,9 +412,17 @@ class SignalSourceViewSet(EnvelopeMixin, viewsets.ModelViewSet):
 class RelayViewSet(EnvelopeMixin, viewsets.ModelViewSet):
     serializer_class = RelaySerializer
 
+    def get_permissions(self):
+        # Members may read relays; only workspace admins may change them.
+        if self.action in ("list", "retrieve", "metadata"):
+            return [IsAuthenticated()]
+        return [IsTenantAdmin()]
+
     def get_queryset(self):
         return apply_scope(
-            RelayConfiguration.objects.select_related("source", "destination"),
+            RelayConfiguration.objects.select_related("source", "destination").order_by(
+                "-created_at"
+            ),
             self.request.user,
             "account__tenant",
         )
@@ -682,7 +711,7 @@ def telegram_auth_start(request):
             request_id=getattr(request, "request_id", ""),
         )
     except TelegramAuthError as exc:
-        raise serializers.ValidationError(str(exc)) from exc
+        raise_telegram_auth_error(exc)
     return ok(
         {
             "challenge_id": str(challenge.id),
@@ -707,8 +736,14 @@ def telegram_auth_verify(request):
             request_id=getattr(request, "request_id", ""),
         )
     except TelegramAuthError as exc:
-        raise serializers.ValidationError(str(exc)) from exc
-    return ok({"challenge_id": str(challenge.id), "status": challenge.state})
+        raise_telegram_auth_error(exc)
+    return ok(
+        {
+            "challenge_id": str(challenge.id),
+            "status": challenge.state,
+            "expires_at": challenge.expires_at,
+        }
+    )
 
 
 @api_view(["POST"])
@@ -725,5 +760,11 @@ def telegram_auth_2fa(request):
             request_id=getattr(request, "request_id", ""),
         )
     except TelegramAuthError as exc:
-        raise serializers.ValidationError(str(exc)) from exc
-    return ok({"challenge_id": str(challenge.id), "status": challenge.state})
+        raise_telegram_auth_error(exc)
+    return ok(
+        {
+            "challenge_id": str(challenge.id),
+            "status": challenge.state,
+            "expires_at": challenge.expires_at,
+        }
+    )

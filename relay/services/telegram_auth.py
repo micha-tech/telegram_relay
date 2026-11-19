@@ -38,6 +38,14 @@ class TelegramAuthError(Exception):
     pass
 
 
+class TelegramFloodWaitError(TelegramAuthError):
+    """Telegram asked us to pause; keep the retry window machine-readable."""
+
+    def __init__(self, seconds: int):
+        self.seconds = seconds
+        super().__init__(f"Too many requests, try again in {seconds} seconds")
+
+
 def record_event(account, kind, detail="", request_id=""):
     AccountConnectionEvent.objects.create(
         account=account, kind=kind, detail=detail[:255], request_id=request_id[:64]
@@ -111,9 +119,7 @@ class TelegramAuthService:
             try:
                 sent = await client.send_code_request(phone_number)
             except FloodWaitError as exc:
-                raise TelegramAuthError(
-                    f"Too many requests, try again in {exc.seconds} seconds"
-                ) from exc
+                raise TelegramFloodWaitError(exc.seconds) from exc
             except (OSError, RPCError) as exc:
                 logger.warning("telegram_unavailable", extra={"error": exc.__class__.__name__})
                 raise TelegramAuthError(
@@ -166,9 +172,7 @@ class TelegramAuthService:
                 await challenge.asave(update_fields=["state", "attempts", "updated_at"])
                 raise TelegramAuthError("The authentication code is invalid or expired") from exc
             except FloodWaitError as exc:
-                raise TelegramAuthError(
-                    f"Too many requests, try again in {exc.seconds} seconds"
-                ) from exc
+                raise TelegramFloodWaitError(exc.seconds) from exc
             except (OSError, RPCError) as exc:
                 logger.warning("telegram_unavailable", extra={"error": exc.__class__.__name__})
                 raise TelegramAuthError(
@@ -196,9 +200,7 @@ class TelegramAuthService:
                 await challenge.asave(update_fields=["state", "attempts", "updated_at"])
                 raise TelegramAuthError("The 2FA password is invalid") from exc
             except FloodWaitError as exc:
-                raise TelegramAuthError(
-                    f"Too many requests, try again in {exc.seconds} seconds"
-                ) from exc
+                raise TelegramFloodWaitError(exc.seconds) from exc
             except (OSError, RPCError) as exc:
                 logger.warning("telegram_unavailable", extra={"error": exc.__class__.__name__})
                 raise TelegramAuthError(

@@ -304,6 +304,10 @@ class SignalSourceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"forward_to": "Forward target must belong to the same account."}
             )
+        if forward_to and forward_to.kind != TelegramEntity.Kind.DESTINATION:
+            raise serializers.ValidationError(
+                {"forward_to": "Forward target must be a destination chat."}
+            )
         if forward_to and entity and forward_to.peer_id == entity.peer_id:
             raise serializers.ValidationError(
                 {"forward_to": "Forward target must be a different chat."}

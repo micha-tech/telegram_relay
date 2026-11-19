@@ -48,8 +48,26 @@ the usual token pair plus a user object:
 }
 ```
 
-`GET /api/v1/auth/me` returns the same shape, so the UI can gate admin screens on
-`role !== "member"` rather than `is_superuser`.
+`GET /api/v1/auth/me` returns the same envelope with the user object as `data`
+(no nested `user`, `access` or `refresh`):
+
+```json
+{
+  "success": true,
+  "message": null,
+  "data": {
+    "id": 1,
+    "email": "founder@example.com",
+    "is_superuser": false,
+    "role": "owner",
+    "tenant": { "id": "…", "name": "Acme Signals", "slug": "acme-signals" }
+  }
+}
+```
+
+The UI mirrors the backend: `owner` and `admin` see administrative screens;
+platform superusers are treated as owners as well. There is no email-verification
+stage in registration — signup immediately returns an authenticated session.
 
 ## Adding people to a workspace
 
@@ -60,7 +78,7 @@ the usual token pair plus a user object:
    `expires_in_days` (1–30, default 7).
 2. The response contains a single-use `code`.
 3. Anyone can preview it at `GET /api/v1/auth/invites/{code}` (public) to show
-   the workspace name and the invited role.
+   the workspace name, invited role and the reserved email (if any).
 4. The invitee registers with `invite_code` instead of `tenant_name`:
 
 ```json
@@ -109,6 +127,13 @@ Foreign keys supplied by clients are re-validated: an admin cannot create a
 signal source or relay that points at another workspace's account or entity, and
 an account owned by the caller is rejected too if the account itself belongs to
 another workspace.
+
+`RelayConfiguration` reads are allowed for any authenticated workspace member;
+creating, editing, enabling, disabling or deleting relays requires an admin role.
+`SignalSource.forward_to` is a `TelegramEntity` UUID for a **destination** entity
+belonging to the same Telegram account — never a raw Telegram peer ID. The
+frontend selects it from `GET /telegram/accounts/{id}/dialogs/`, where each dialog
+exposes `source_id` and `destination_id`.
 
 An inactive workspace (`Tenant.is_active = False`) cannot be used: its records
 disappear from scoped querysets, its invites cannot be previewed or redeemed, and

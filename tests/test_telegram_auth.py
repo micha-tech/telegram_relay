@@ -87,6 +87,7 @@ def test_verify_code_completes_and_persists_session(user, client, monkeypatch, t
     )
     assert response.status_code == 200
     assert response.data["data"]["status"] == AuthenticationChallenge.State.COMPLETE
+    assert response.data["data"]["expires_at"] == start.data["data"]["expires_at"]
     account = TelegramAccount.objects.get(user=user)
     assert account.status == TelegramAccount.Status.CONNECTED
     assert account.telegram_user_id == 999
@@ -141,6 +142,7 @@ def test_verify_2fa_completes(user, client, monkeypatch, telegram_env):
     )
     assert response.status_code == 200
     assert response.data["data"]["status"] == AuthenticationChallenge.State.COMPLETE
+    assert response.data["data"]["expires_at"] == start.data["data"]["expires_at"]
     assert TelegramAccount.objects.get(user=user).status == TelegramAccount.Status.CONNECTED
 
 
@@ -188,8 +190,11 @@ def test_flood_wait_is_sanitized(user, client, monkeypatch, telegram_env):
         "/api/v1/telegram/auth/start", {"phone_number": "+15551234567"}, format="json"
     )
     assert response.status_code == 400
-    assert "30" in str(response.data)
-    assert "FloodWait" not in str(response.data)
+    payload = response.data
+    assert payload["error"]["code"] == "flood_wait"
+    assert payload["error"]["details"] == {"retry_after_seconds": 30}
+    assert "30" in payload["message"]
+    assert "FloodWait" not in str(payload)
 
 
 def test_other_user_cannot_use_challenge(user, other_user, client, monkeypatch, telegram_env):

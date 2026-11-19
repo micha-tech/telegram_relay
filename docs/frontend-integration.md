@@ -14,12 +14,19 @@ Read it through a single API-client module (for example `lib/telegramApi.ts`) so
 
 ## Authentication
 
-The website remains the source of user identity. Two supported integration modes — pick one and configure `JWT_SECRET_KEY` on the backend to match:
+The backend is the source of user identity. The browser signs up or signs in via
+`POST /api/v1/auth/register` or `/auth/login` and receives a short-lived access
+token (15 minutes) plus a refresh token inside the success envelope. Send the
+access token as `Authorization: Bearer <token>`; `POST /api/v1/auth/refresh` is
+raw SimpleJWT (`{ "refresh": "…" }` → `{ "access": "…" }`, not enveloped), and
+`POST /api/v1/auth/logout` blacklists the refresh token. `GET /api/v1/auth/me`
+returns the current user object as the envelope's `data`.
 
-1. **Shared JWT signing key (recommended if the website already issues JWTs).** The website's access tokens are signed with the same secret configured as `JWT_SECRET_KEY`; the backend verifies them with `Authorization: Bearer <token>` and maps the verified identity to its user table. No token minting on the frontend.
-2. **Backend-to-backend exchange.** The website's own backend exchanges a verified session for short-lived backend tokens via `POST /api/v1/auth/login` or `register`; the browser only ever holds short-lived access tokens (15 minutes) plus a refresh token.
-
-Never pass user IDs in request bodies or query strings; every endpoint derives the owner from the verified token. The backend independently enforces that the authenticated user owns every account, challenge, and relay it touches (cross-user access returns 404).
+Never pass user IDs or tenant IDs in request bodies or query strings; every
+endpoint derives them from the verified token. The backend scopes every queryset
+to the caller's workspace and re-checks foreign keys supplied by clients.
+Cross-workspace access returns empty results or a `400`/`403`, not another
+workspace's data.
 
 ## Connection flow endpoints
 
@@ -30,7 +37,14 @@ Never pass user IDs in request bodies or query strings; every endpoint derives t
 | 2FA | `POST /telegram/auth/2fa` `{challenge_id, password}` | only when `password_required` |
 | Status | `GET` accounts list / detail | safe fields only |
 
-Errors are sanitized (`400` with a human-readable message, e.g. flood-wait seconds). Codes, passwords, and session strings never appear in responses or logs.
+Errors are sanitized and enveloped as
+`{ success: false, data: null, message, error: { code, details } }`. Telegram
+FloodWait uses `400`, `error.code = "flood_wait"` and
+`error.details.retry_after_seconds`; throttle errors use `429` and
+`error.code = "throttled"`. Codes, passwords, and session strings never appear in
+responses or logs. All three challenge endpoints return
+`{ challenge_id, status, expires_at }`, so advancing the wizard does not lose the
+expiry hint.
 
 ## Account management endpoints
 
@@ -46,7 +60,9 @@ Router-based routes (`/telegram/accounts/`, `/telegram/entities/`, `/relays/`, `
 
 ## UI requirements
 
-Use the website's existing design system. A Telegram Accounts section needs: Connect button → phone → code → optional 2FA password → success; account list with status badges, masked phone, last activity, reconnect and disconnect actions; loading, empty, and error states; recovery from expired challenges (offer "start again" once `expires_at` passes). Never render session strings or raw phone numbers.
+Use the website's existing design system. A Telegram Accounts section needs: Connect button → phone → code → optional 2FA password → success; account list with status badges, masked phone, last activity, reconnect and disconnect actions; loading, empty, and error states; recovery from expired challenges (offer "start again" once `expires_at` passes). Gate these controls on an admin/owner role or platform superuser. Never render session strings or raw phone numbers.
+
+The signal feed is readable by all members. Watched chat management and relay writes require an admin role. When offering forwarding, send the destination **entity UUID** from `dialogs[].destination_id` as `forward_to`; raw peer IDs are rejected.
 
 ## Workspaces (multi-tenancy)
 
@@ -56,10 +72,16 @@ existing workspace requires an invite code. See
 
 ```ts
 // New workspace: the caller becomes its owner ("super admin" of that workspace)
-await telegramApi.register("founder@example.com", "…", { tenantName: "Acme" });
+await apiRequest("/auth/register", {
+  method: "POST",
+  body: { email: "founder@example.com", password: "…", tenant_name: "Acme" },
+});
 
-// Join an existing workspace with an invite code
-await telegramApi.register("friend@example.com", "…", { inviteCode: code });
+// Join an existing workspace with an invite code (optionally email-locked)
+await apiRequest("/auth/register", {
+  method: "POST",
+  body: { email: "friend@example.com", password: "…", invite_code: code },
+});
 ```
 
 `auth/me` and the register/login payload include `role` and `tenant`:
@@ -70,7 +92,7 @@ await telegramApi.register("friend@example.com", "…", { inviteCode: code });
   "tenant": { "id": "…", "name": "Acme", "slug": "acme" } }
 ```
 
-Gate administrative UI on `role === "owner" || role === "admin"` (not on
-`is_superuser`, which is platform-level). Members see only their workspace's
-signal feed. Workspace management lives under `/tenant/…` — see the endpoint
-table in `docs/multi-tenancy.md`.
+Gate administrative UI on `role === "owner" || role === "admin" ||
+is_superuser`: the backend treats platform superusers as workspace owners too.
+Members see only their workspace's signal feed. Workspace management lives under
+`/tenant/…` — see the endpoint table in `docs/multi-tenancy.md`.

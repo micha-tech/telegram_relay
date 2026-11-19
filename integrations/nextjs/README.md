@@ -38,14 +38,16 @@ await telegramApi.register(email, password, { tenantName: "Acme" }); // new work
 await telegramApi.register(email, password, { inviteCode: code });   // join one
 
 const me = await telegramApi.me();
-const isAdmin = me.role === "owner" || me.role === "admin";
+const isAdmin = me.is_superuser || me.role === "owner" || me.role === "admin";
 
 const invite = await telegramApi.createInvite({ role: "member", expiresInDays: 7 });
 // share invite.code; invitees preview it with telegramApi.previewInvite(code)
 ```
 
-Gate admin screens on `role`, not `is_superuser` (which is platform-level). See
-`docs/multi-tenancy.md` for the endpoint table and role rules.
+Gate admin screens on `role` **or** `is_superuser`: the backend grants owner/admin
+rights to platform superusers. Invites may be email-locked, so show the previewed
+email and register with the same address. See `docs/multi-tenancy.md` for the
+endpoint table and role rules.
 
 ## Example component
 

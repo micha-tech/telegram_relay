@@ -369,7 +369,7 @@ def test_member_cannot_relay_through_own_account_in_another_workspace(
         format="json",
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 403
     assert RelayConfiguration.objects.count() == 0
 
 
@@ -389,3 +389,112 @@ def test_entity_serializer_rejects_own_account_in_another_workspace(rf, regular_
 
     assert not serializer.is_valid()
     assert "account" in serializer.errors
+
+
+def test_rename_response_keeps_the_callers_role(client, user):
+    client.force_authenticate(user)
+    response = client.patch("/api/v1/tenant/rename/", {"name": "Renamed"}, format="json")
+
+    assert response.status_code == 200
+    assert response.data["data"]["name"] == "Renamed"
+    assert response.data["data"]["role"] == Membership.Role.OWNER
+
+
+def test_members_can_read_relays_but_cannot_write_them(client, regular_user, account):
+    source = TelegramEntity.objects.create(
+        user=account.user,
+        account=account,
+        kind=TelegramEntity.Kind.SOURCE,
+        peer_id=-100777,
+        entity_type="channel",
+    )
+    destination = TelegramEntity.objects.create(
+        user=account.user,
+        account=account,
+        kind=TelegramEntity.Kind.DESTINATION,
+        peer_id=-100888,
+        entity_type="channel",
+    )
+    relay = RelayConfiguration.objects.create(
+        user=account.user,
+        account=account,
+        source=source,
+        destination=destination,
+        name="Existing relay",
+        rules={},
+    )
+    body = {
+        "account": str(account.id),
+        "source": str(source.id),
+        "destination": str(destination.id),
+        "name": "New relay",
+        "rules": {},
+    }
+    client.force_authenticate(regular_user)
+
+    assert client.get("/api/v1/relays/").status_code == 200
+    assert client.get(f"/api/v1/relays/{relay.id}/").status_code == 200
+    assert client.post("/api/v1/relays/", body, format="json").status_code == 403
+    assert (
+        client.patch(f"/api/v1/relays/{relay.id}/", {"name": "Changed"}, format="json").status_code
+        == 403
+    )
+    assert client.post(f"/api/v1/relays/{relay.id}/enable/", {}, format="json").status_code == 403
+    assert client.delete(f"/api/v1/relays/{relay.id}/").status_code == 403
+    assert RelayConfiguration.objects.count() == 1
+
+
+def test_admin_can_manage_relays(client, user, account):
+    source = TelegramEntity.objects.create(
+        user=account.user,
+        account=account,
+        kind=TelegramEntity.Kind.SOURCE,
+        peer_id=-100999,
+        entity_type="channel",
+    )
+    destination = TelegramEntity.objects.create(
+        user=account.user,
+        account=account,
+        kind=TelegramEntity.Kind.DESTINATION,
+        peer_id=-101000,
+        entity_type="channel",
+    )
+    client.force_authenticate(user)
+    created = client.post(
+        "/api/v1/relays/",
+        {
+            "account": str(account.id),
+            "source": str(source.id),
+            "destination": str(destination.id),
+            "name": "Admin relay",
+            "rules": {},
+        },
+        format="json",
+    )
+
+    assert created.status_code == 201
+    relay_id = created.data["data"]["id"]
+    assert client.post(f"/api/v1/relays/{relay_id}/enable/", {}, format="json").status_code == 200
+    assert client.delete(f"/api/v1/relays/{relay_id}/").status_code == 200
+
+
+def test_signal_source_rejects_source_as_forward_target(client, user, account):
+    source = TelegramEntity.objects.create(
+        user=account.user,
+        account=account,
+        kind=TelegramEntity.Kind.SOURCE,
+        peer_id=-101111,
+        entity_type="channel",
+    )
+    watched = SignalSource.objects.create(
+        account=account, entity=source, name="Watched", enabled=True
+    )
+    client.force_authenticate(user)
+    response = client.patch(
+        f"/api/v1/signal-sources/{watched.id}/",
+        {"forward_enabled": True, "forward_to": str(source.id)},
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "forward_to" in response.data["error"]["details"]

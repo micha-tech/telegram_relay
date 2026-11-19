@@ -19,13 +19,20 @@ def exception_handler(exc, context):
             status=500,
         )
     detail = response.data.get("detail") if isinstance(response.data, dict) else None
+    retry_after = getattr(exc, "retry_after_seconds", None)
+    if retry_after is not None:
+        details = {"retry_after_seconds": retry_after}
+    elif not detail:
+        details = response.data
+    else:
+        details = None
     response.data = {
         "success": False,
         "data": None,
         "message": str(detail or "Request validation failed"),
         "error": {
             "code": getattr(exc, "default_code", "REQUEST_ERROR"),
-            "details": response.data if not detail else None,
+            "details": details,
         },
     }
     return response
