@@ -61,6 +61,8 @@ class RegisterSerializer(serializers.Serializer):
             raise serializers.ValidationError("This invite has already been used")
         if invite.expires_at <= timezone.now():
             raise serializers.ValidationError("This invite has expired")
+        if not invite.tenant.is_active:
+            raise serializers.ValidationError("This workspace is not active")
         email = (self.initial_data.get("email") or "").strip().lower()
         if invite.email and invite.email != email:
             raise serializers.ValidationError(
@@ -197,7 +199,7 @@ class TelegramEntitySerializer(serializers.ModelSerializer):
 
     def validate_account(self, account):
         user = self.context["request"].user
-        if account.user_id != user.id and not can_access_tenant(user, account.tenant_id):
+        if not can_access_tenant(user, account.tenant_id):
             raise serializers.ValidationError("Invalid account")
         return account
 
@@ -225,9 +227,10 @@ class RelaySerializer(serializers.ModelSerializer):
         account = attrs.get("account", getattr(self.instance, "account", None))
         source = attrs.get("source", getattr(self.instance, "source", None))
         destination = attrs.get("destination", getattr(self.instance, "destination", None))
-        usable = account and (
-            account.user_id == user.id
-            or (is_tenant_admin(user) and can_access_tenant(user, account.tenant_id))
+        usable = (
+            account
+            and can_access_tenant(user, account.tenant_id)
+            and (account.user_id == user.id or is_tenant_admin(user))
         )
         if not usable:
             raise serializers.ValidationError("Invalid account")

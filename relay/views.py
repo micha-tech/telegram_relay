@@ -9,6 +9,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.exceptions import TokenError
@@ -58,7 +59,7 @@ from relay.services.telegram_auth import TelegramAuthError, TelegramAuthService
 from relay.services.telegram_entities import TelegramEntityService
 from relay.tenancy import (
     apply_scope,
-    ensure_membership,
+    ensure_active_membership,
     is_tenant_owner,
     issue_invite,
     membership_for,
@@ -485,6 +486,8 @@ class TenantViewSet(viewsets.GenericViewSet):
         membership = membership_for(self.request.user)
         if membership is None:
             raise serializers.ValidationError("You are not a member of a workspace")
+        if not membership.tenant.is_active:
+            raise PermissionDenied("This workspace is inactive")
         return membership.tenant
 
     @action(detail=False, methods=["get"])
@@ -526,7 +529,7 @@ class MemberViewSet(EnvelopeMixin, viewsets.GenericViewSet):
         return ok(self.get_serializer(self.get_queryset(), many=True).data)
 
     def create(self, request, *args, **kwargs):
-        membership = ensure_membership(request.user)
+        membership = ensure_active_membership(request.user)
         serializer = MemberCreateSerializer(
             data=request.data, context={"tenant": membership.tenant}
         )
@@ -614,7 +617,7 @@ class InviteViewSet(EnvelopeMixin, viewsets.GenericViewSet):
         return ok(self.get_serializer(self.get_queryset(), many=True).data)
 
     def create(self, request, *args, **kwargs):
-        membership = ensure_membership(request.user)
+        membership = ensure_active_membership(request.user)
         serializer = InviteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -648,7 +651,7 @@ class InviteViewSet(EnvelopeMixin, viewsets.GenericViewSet):
 @permission_classes([AllowAny])
 def invite_preview(request, code):
     invite = Invite.objects.select_related("tenant").filter(code=code).first()
-    if invite is None or not invite.is_usable:
+    if invite is None or not invite.is_usable or not invite.tenant.is_active:
         raise serializers.ValidationError("This invite is not valid")
     return ok(
         {
@@ -671,7 +674,7 @@ class TelegramAuthThrottle(ScopedRateThrottle):
 def telegram_auth_start(request):
     serializer = TelegramAuthStartSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-    ensure_membership(request.user)
+    ensure_active_membership(request.user)
     try:
         challenge = TelegramAuthService().start(
             request.user,

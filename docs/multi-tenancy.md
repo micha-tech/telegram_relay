@@ -8,15 +8,16 @@ is shared between workspaces.
 
 | Role | Can do |
 | --- | --- |
-| `owner` | Everything an admin can, plus: create/remove admins, change roles, rename the workspace, transfer ownership safeguards |
+| `owner` | Everything an admin can, plus: create/remove admins, change roles and rename the workspace |
 | `admin` | Connect/disconnect Telegram accounts, list entities, manage signal sources and relays, invite/add members |
-| `member` | Read the workspace signal feed, relays and processed messages; manage their own profile |
+| `member` | Read the workspace signal feed, relays and processed messages |
 
 The first user of a workspace is its `owner` — that is the "super admin" of that
 workspace. Global Django superusers (`is_superuser`) remain platform operators:
 a superuser **with** a membership is confined to that membership's workspace, a
-superuser **without** one sees every workspace through the API and is intended
-for support/operations.
+superuser **without** one has unrestricted queryset scope for support/operations.
+Workspace-scoped actions that need a single workspace (`/tenant/current/`, rename,
+members and invites) require a membership and reject membership-less callers.
 
 ## Self-serve signup
 
@@ -105,7 +106,13 @@ workspace for a membership-less platform superuser). `Signal`, `SignalSource`,
 through the account, so there is a single source of truth for the tenant.
 
 Foreign keys supplied by clients are re-validated: an admin cannot create a
-signal source or relay that points at another workspace's account or entity.
+signal source or relay that points at another workspace's account or entity, and
+an account owned by the caller is rejected too if the account itself belongs to
+another workspace.
+
+An inactive workspace (`Tenant.is_active = False`) cannot be used: its records
+disappear from scoped querysets, its invites cannot be previewed or redeemed, and
+workspace management returns `403`. Reactivate the workspace to restore access.
 
 ## Migrating an existing installation
 
@@ -116,4 +123,6 @@ Migration `relay/migrations/0008_tenancy.py`:
    `member`),
 3. assigns every existing Telegram account to its owner's workspace.
 
-Existing data therefore stays visible to the same people after upgrade.
+Existing data therefore stays visible to the same people after upgrade. All
+pre-existing users share the `default` workspace, so isolate them into separate
+workspaces if the installation needs per-team separation.

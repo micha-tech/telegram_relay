@@ -15,6 +15,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.utils.text import slugify
+from rest_framework.exceptions import PermissionDenied
 
 from relay.models import Invite, Membership, Tenant
 
@@ -93,6 +94,14 @@ def ensure_membership(user) -> Membership:
     return membership_for(user)
 
 
+def ensure_active_membership(user) -> Membership:
+    """Membership for writes that create workspace-owned records."""
+    membership = ensure_membership(user)
+    if not membership.tenant.is_active:
+        raise PermissionDenied("This workspace is inactive")
+    return membership
+
+
 def issue_invite(
     tenant, created_by, *, role: str, email: str = "", days: int = INVITE_TTL_DAYS
 ) -> Invite:
@@ -111,10 +120,12 @@ def tenant_scope(user, field: str) -> Q | None:
 
     Returns ``None`` when the caller is a platform operator without a workspace
     (meaning: no restriction), and an unsatisfiable ``Q`` for users who are not
-    in any tenant.
+    in any tenant or whose workspace is inactive.
     """
     membership = membership_for(user)
     if membership is not None:
+        if not membership.tenant.is_active:
+            return Q(pk__in=[])
         return Q(**{field: membership.tenant_id})
     if getattr(user, "is_superuser", False):
         return None
@@ -132,5 +143,5 @@ def can_access_tenant(user, tenant_id) -> bool:
     """True when the user may act on records belonging to ``tenant_id``."""
     membership = membership_for(user)
     if membership is not None:
-        return str(membership.tenant_id) == str(tenant_id)
+        return membership.tenant.is_active and str(membership.tenant_id) == str(tenant_id)
     return bool(getattr(user, "is_superuser", False))

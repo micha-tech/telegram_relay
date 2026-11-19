@@ -7,12 +7,14 @@ from django.utils import timezone
 from relay.models import (
     Invite,
     Membership,
+    RelayConfiguration,
     Signal,
     SignalSource,
     TelegramAccount,
     TelegramEntity,
     Tenant,
 )
+from relay.serializers import TelegramEntitySerializer
 from relay.services.signals import capture
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("no_redis")]
@@ -289,3 +291,101 @@ def test_tenant_endpoints_do_not_leak_other_workspaces(client, user, other_user)
     assert [row["email"] for row in members] == ["person@example.com"]
     invites = client.get("/api/v1/tenant/invites/").data["data"]
     assert invites == []
+
+
+def test_inactive_workspace_is_inaccessible(client, user, account):
+    client.force_authenticate(user)
+    assert client.get("/api/v1/telegram/accounts/").data["data"]["count"] == 1
+
+    tenant = user.membership.tenant
+    tenant.is_active = False
+    tenant.save(update_fields=["is_active"])
+
+    assert client.get("/api/v1/telegram/accounts/").data["data"]["count"] == 0
+    assert client.get("/api/v1/signals/stats/").data["data"]["total"] == 0
+    assert client.get("/api/v1/tenant/current/").status_code == 403
+    assert client.post("/api/v1/tenant/invites/", {}, format="json").status_code == 403
+    assert (
+        client.post(
+            "/api/v1/tenant/members/",
+            {"email": "new@example.com", "password": "a-strong-password-123"},
+            format="json",
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/v1/telegram/auth/start", {"phone_number": "+15551234567"}, format="json"
+        ).status_code
+        == 403
+    )
+
+
+def test_invite_to_inactive_workspace_cannot_be_previewed_or_redeemed(client, user, tenant):
+    client.force_authenticate(user)
+    code = client.post("/api/v1/tenant/invites/", {"role": "member"}, format="json").data["data"][
+        "code"
+    ]
+
+    tenant.is_active = False
+    tenant.save(update_fields=["is_active"])
+
+    assert client.get(f"/api/v1/auth/invites/{code}").status_code == 400
+    assert register(client, "invitee@example.com", invite_code=code).status_code == 400
+
+
+def test_member_cannot_relay_through_own_account_in_another_workspace(
+    client, regular_user, other_user
+):
+    other_tenant = other_user.membership.tenant
+    misplaced = TelegramAccount.objects.create(
+        user=regular_user, tenant=other_tenant, phone_number="+15550004444"
+    )
+    source = TelegramEntity.objects.create(
+        user=regular_user,
+        account=misplaced,
+        kind=TelegramEntity.Kind.SOURCE,
+        peer_id=-100444,
+        entity_type="channel",
+    )
+    destination = TelegramEntity.objects.create(
+        user=regular_user,
+        account=misplaced,
+        kind=TelegramEntity.Kind.DESTINATION,
+        peer_id=-100555,
+        entity_type="channel",
+    )
+
+    client.force_authenticate(regular_user)
+    response = client.post(
+        "/api/v1/relays/",
+        {
+            "account": str(misplaced.id),
+            "source": str(source.id),
+            "destination": str(destination.id),
+            "name": "Cross-tenant relay",
+            "rules": {},
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert RelayConfiguration.objects.count() == 0
+
+
+def test_entity_serializer_rejects_own_account_in_another_workspace(rf, regular_user, other_user):
+    misplaced = TelegramAccount.objects.create(
+        user=regular_user,
+        tenant=other_user.membership.tenant,
+        phone_number="+15550006666",
+    )
+    request = rf.post("/api/v1/telegram/entities/")
+    request.user = regular_user
+
+    serializer = TelegramEntitySerializer(
+        data={"account": str(misplaced.id), "kind": "source", "peer_id": -100666},
+        context={"request": request},
+    )
+
+    assert not serializer.is_valid()
+    assert "account" in serializer.errors
