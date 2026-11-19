@@ -140,9 +140,58 @@ def test_preview_skips_empty_results_unless_drop_empty_is_disabled(client, user)
     assert kept.data["data"] == {"formatted": "ALERT", "skipped": False}
 
 
+def test_body_keeps_apostrophes_and_ordinary_prose_literal(client, user):
+    client.force_authenticate(user)
+    response = client.post(
+        f"{TEMPLATES}preview/",
+        config(body="{{ source }}: {{ text }}\nyou're welcome to football")
+        | {"text": "Over 2.5 goals", "source": "Tips"},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.data["data"]["formatted"] == (
+        "Tips: Over 2.5 goals\nyou're welcome to football"
+    )
+
+
+def test_admin_can_save_a_template_containing_apostrophes(client, user):
+    client.force_authenticate(user)
+    response = client.post(
+        TEMPLATES,
+        config(
+            name="Sign-off",
+            body="{{ text }}\nyou're welcome to football",
+        ),
+        format="json",
+    )
+
+    assert response.status_code == 201
+    assert response.data["data"]["body"] == "{{ text }}\nyou're welcome to football"
+
+
+def test_unknown_placeholders_are_left_untouched(client, user):
+    client.force_authenticate(user)
+    response = client.post(
+        f"{TEMPLATES}preview/",
+        config(body="{{ you're welcome to football }} {{ missing }}")
+        | {"text": "Over 2.5 goals"},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.data["data"]["formatted"] == (
+        "{{ you're welcome to football }} {{ missing }}"
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("remove_patterns", ["("]), ("body", "{% bogus %}"), ("replacements", [{"from": ""}])],
+    [
+        ("remove_patterns", ["("]),
+        ("body", "x" * 4001),
+        ("replacements", [{"from": ""}]),
+    ],
 )
 def test_preview_rejects_invalid_configurations(client, user, field, value):
     client.force_authenticate(user)

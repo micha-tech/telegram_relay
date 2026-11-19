@@ -2,17 +2,21 @@
 
 The stored :class:`~relay.models.Signal` always keeps the raw message. Templates
 only affect the copy sent to a destination chat, so the workspace feed remains a
-faithful, searchable record. A template is plain text with Django template
-placeholders (``{{ text }}``, ``{{ source }}``, ``{{ author }}`` …) plus a small
-set of ordered cleanup steps.
+faithful, searchable record. A template is plain text with simple
+``{{ placeholder }}`` tokens (``{{ text }}``, ``{{ source }}``, ``{{ author }}``
+…) plus a small set of ordered cleanup steps.
+
+Bodies are rendered with literal placeholder substitution rather than a full
+template language. Admins routinely write ordinary prose (apostrophes, quotes,
+braces) in their layouts, and treating that prose as code produced confusing
+parse errors — for example ``{{ you're welcome }}``. Only exact, known
+placeholders are replaced; everything else is kept exactly as written.
 """
 
 import re
 
-from django.template import Context, Template
-from django.template.exceptions import TemplateSyntaxError
-
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 MAX_BODY_LENGTH = 4000
 MAX_TEMPLATE_LENGTH = 4000
 MAX_TEXT_LENGTH = 2000
@@ -25,16 +29,20 @@ class TemplateConfigError(ValueError):
     """Raised when an admin-supplied template configuration is invalid."""
 
 
-def compile_body(body: str) -> Template:
-    """Compile a template body, rejecting invalid Django template syntax."""
+def validate_body(body: str) -> str:
+    """Validate a template body's size; all of its text is treated as literal."""
     if len(body or "") > MAX_TEMPLATE_LENGTH:
         raise TemplateConfigError(
             f"Template body must be at most {MAX_TEMPLATE_LENGTH} characters."
         )
-    try:
-        return Template(body or "")
-    except TemplateSyntaxError as exc:
-        raise TemplateConfigError(f"Invalid template: {exc}") from exc
+    return body or ""
+
+
+def render_body(body: str, context: dict) -> str:
+    """Replace known placeholders, leaving all other text untouched."""
+    return PLACEHOLDER_RE.sub(
+        lambda match: str(context.get(match.group(1), match.group(0))), body
+    )
 
 
 def validate_patterns(patterns) -> list[str]:
@@ -133,15 +141,7 @@ def format_signal(
         "peer_id": peer_id if peer_id is not None else "",
     }
     template_body = _value(config, "body", "") or ""
-    if template_body:
-        try:
-            rendered = compile_body(template_body).render(
-                Context(context, autoescape=False)
-            )
-        except TemplateConfigError:
-            rendered = body
-    else:
-        rendered = body
+    rendered = render_body(template_body, context) if template_body else body
 
     header = _value(config, "header", "") or ""
     footer = _value(config, "footer", "") or ""

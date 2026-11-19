@@ -19,10 +19,10 @@ from relay.models import (
 )
 from relay.services.signal_formatting import (
     TemplateConfigError,
-    compile_body,
     validate_patterns,
     validate_replacements,
 )
+from relay.services.signal_formatting import validate_body as validate_template_body
 from relay.tenancy import can_access_tenant, create_tenant, is_tenant_admin, membership_for
 
 User = get_user_model()
@@ -279,7 +279,7 @@ class SignalTemplateConfigMixin(serializers.Serializer):
 
     def validate_body(self, value):
         try:
-            compile_body(value)
+            validate_template_body(value)
         except TemplateConfigError as exc:
             raise serializers.ValidationError(str(exc)) from exc
         return value
